@@ -3,12 +3,14 @@ from tensorflow.python.ops import rnn, rnn_cell
 import numpy as np
 import data_help as dh
 
+
 # load data
 # find ids for randomizing data - TODO with shuffle=True flag from tf
 # mask each batch - TODO with tf.train.batch(...pad..=True)
 # how to avoid making placeholders of fixed size for time?
-
+# TODO: add sigmoid activation to output product
 tf.reset_default_graph()
+map_fn = tf.python.map_fn
 
 
 # order of information from load_data
@@ -18,11 +20,10 @@ Y = 2
 YT = 3
 
 # Parameters (options)
-# n_steps = maxlen
+# max_length = maxlen
 ops = {
             'epochs': 3, 
             'frame_size': 3,
-            'n_steps': 300,
             'n_hidden': 50,
             'n_classes': 50,
             'learning_rate': 0.001,
@@ -31,6 +32,7 @@ ops = {
           }
 
 # tf Graph input
+seq_length = tf.placeholder(tf.int32)
 x = tf.placeholder("float", [None, ops['max_length'], ops['frame_size']]) #None - for dynamic batch sizing
 y = tf.placeholder("float", [None, ops['max_length'],  ops['n_classes']])
 
@@ -42,14 +44,14 @@ b = {'out': tf.Variable(tf.random_normal([ops['n_classes']]))}
 def RNN(x, W, b):
     """
     Prepare data shape to match 'rnn' function req-s
-    Current data input shape: (ops['n_steps'], ops['batch_size'], frame_size)
-    Required shape: 'ops['n_steps']' tensors list of shape (ops['batch_size'], frame_size)
+    Current data input shape: (ops['max_length'], ops['batch_size'], frame_size)
+    Required shape: 'ops['max_length']' tensors list of shape (ops['batch_size'], frame_size)
     """
 
-    # Reshaping to (ops['n_steps']*ops['batch_size'], frame_size)
+    # Reshaping to (ops['max_length']*ops['batch_size'], frame_size)
     # x = tf.reshape(x, [-1, ops['frame_size']])
-    # # Split to get a list of 'ops['n_steps']' tensors of shape (ops['batch_size'], frame_size)
-    # x = tf.split(0, ops['n_steps'], x)
+    # # Split to get a list of 'ops['max_length']' tensors of shape (ops['batch_size'], frame_size)
+    # x = tf.split(0, ops['max_length'], x)
     
     # lstm cell
     lstm_cell = rnn_cell.BasicLSTMCell(ops['n_hidden'], forget_bias=1.0)
@@ -62,10 +64,11 @@ def RNN(x, W, b):
                                 lstm_cell, 
                                 x, 
                                 dtype=tf.float32,
-                                sequence_length=dh.length(x))
+                                sequence_length=seq_length)
     
     #linear activation, using rnn innter loop last output
-    return [tf.matmul(outputs[i], W['out']) + b['out'] for i in range(ops['n_steps'])]
+    output_projection = lambda x: tf.matmul(x, W['out']) + b['out']
+    return map_fn(output_projection, outputs)
 
 
 pred = RNN(x, W, b)
@@ -116,8 +119,8 @@ with tf.Session() as sess:
             batch_yt = [train_set[i][YT] for i in batch_indeces]
             print np.array(batch_x).shape, batch_x
             # pad minibatch
-            batch_x, batch_xt, batch_y, batch_yt, mask = dh.prepare_data(batch_x, batch_xt, batch_y, batch_yt, maxlen=-1)
-            # make an input set of dimensions (batch_size, n_steps, frame_size)
+            batch_x, batch_xt, batch_y, batch_yt, mask, batch_maxlen = dh.prepare_data(batch_x, batch_xt, batch_y, batch_yt, -1, ops['max_length'])
+            # make an input set of dimensions (batch_size, max_length, frame_size)
             x_set = np.array([batch_x, batch_xt, batch_yt]).transpose([1,2,0])
-            sess.run(optimizer, feed_dict={x: x_set, y: dh.embed_one_hot(batch_y, ops['n_classes'], ops['max_length'])})
+            sess.run(optimizer, feed_dict={x: x_set, y: dh.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), seq_length: batch_maxlen})
 

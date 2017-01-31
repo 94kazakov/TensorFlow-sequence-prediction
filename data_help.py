@@ -93,7 +93,7 @@ def get_minibatches_ids(n, minibatch_size, shuffle=True):
     return minibatches
 
 
-def prepare_data(ox, oxt, oy, oyt, maxlen=None):
+def prepare_data(ox, oxt, oy, oyt, maxlen=None, extended_len=0):
     """
     Pads each sequences with zeroes until maxlen to make a
     minibatch matrix that's of dimension (maxlen, batch_size)
@@ -122,16 +122,13 @@ def prepare_data(ox, oxt, oy, oyt, maxlen=None):
         oy = new_oy
         oyt = new_oyt
     
-    # cut to miniumal length
-    if maxlen == -1:
-        minlen = np.min(lengths)
-        ox = ox[:minlen]
-        oxt = oxt[:minlen]
-        oy = oy[:minlen]
-        oyt = oyt[:minlen]
-    
     
     maxlen = np.max(lengths)
+
+    # extend to maximal length, TODO: remove
+    if extended_len != 0:
+        maxlen = extended_len
+
     batch_size = len(ox)
     
     x = np.zeros((batch_size, maxlen)).astype('int64')
@@ -147,7 +144,7 @@ def prepare_data(ox, oxt, oy, oyt, maxlen=None):
         yt[i, :lengths[i]] = oyt[i]
         x_mask[i, :lengths[i]] = 1.0
          
-    return x, xt, y, yt, x_mask
+    return x, xt, y, yt, x_mask, maxlen
 
 
 def embed_one_hot(batch_array, depth, length):
@@ -162,7 +159,6 @@ def embed_one_hot(batch_array, depth, length):
     for i,array in enumerate(batch_array):
         array = [x - 1 for x in array]
         one_hot_matrix[i, np.arange(len(array)), array] = 1
-    print one_hot_matrix.shape
     return one_hot_matrix
 
 def length(sequence):
