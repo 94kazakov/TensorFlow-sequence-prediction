@@ -1,8 +1,40 @@
 import tensorflow as tf
 from tensorflow.python.ops import rnn, rnn_cell
 import numpy as np
-import data_help as dh
+import data_help as DH
+import tensor_classes_helpers as TCH
 
+
+"""
+STRUCTURE:
+data_help:
+    + read_file_time_sequences(fname)
+    + load_data(dir, sort_by_len=True, valid_ratio=0.1)
+    + get_minibatches_ids(n, minibatch_size, shuffle=True)
+    + prepare_data(ox, oxt, oy, oyt, maxlen=None, extended_len=0)
+    + embed_one_hot(batch_array, depth, length)
+    + length(sequence)
+main:
+    Main logic is here as well as all of the manipulations.
+    We store the variables for tensorflow only here. 
+    - parameters:
+        RNN/HPM (decide here)
+        number of epochs
+        dimensions, hidden layers
+    - init layers
+    - init solvers
+    - all manipulations
+tensor_classes_helpers:
+    Here, we have functions of encoders and functions to
+    manipulate tensorflow variables
+    RNN:
+        + init(input_dim, output_dim)
+    HPM:
+    + encoders
+    + weights, bias inits
+
+
+"""
 
 # load data
 # find ids for randomizing data - TODO with shuffle=True flag from tf
@@ -12,93 +44,8 @@ import data_help as dh
 # Make sure padding works (to ignore 0's during accuracy and loss count)
 # Code Bayesian. 
 # Abstract RNN into a separate class (make sure we can connect layer upon layer)
-tf.reset_default_graph()
-map_fn = tf.python.map_fn
-
-
-# order of information from load_data
-X = 0
-XT = 1
-Y = 2
-YT = 3
-
-# Parameters (options)
-# max_length = maxlen
-ops = {
-            'epochs': 300, 
-            'frame_size': 3,
-            'n_hidden': 50,
-            'n_classes': 50,
-            'learning_rate': 0.001,
-            'batch_size': 16,
-            'max_length': 400
-          }
-
-# tf Graph input
-seq_length = tf.placeholder(tf.int32)
-x = tf.placeholder("float", [None, ops['max_length'], ops['frame_size']]) #None - for dynamic batch sizing
-y = tf.placeholder("float", [None, ops['max_length'],  ops['n_classes']])
-
-# Weights
-W = {'out': tf.Variable(tf.random_normal([ops['n_hidden'], ops['n_classes']]))}
-b = {'out': tf.Variable(tf.random_normal([ops['n_classes']]))}
-
-
-def RNN(x, W, b):
-    """
-    Prepare data shape to match 'rnn' function req-s
-    Current data input shape: (ops['max_length'], ops['batch_size'], frame_size)
-    Required shape: 'ops['max_length']' tensors list of shape (ops['batch_size'], frame_size)
-    """
-
-    # Reshaping to (ops['max_length']*ops['batch_size'], frame_size)
-    # x = tf.reshape(x, [-1, ops['frame_size']])
-    # # Split to get a list of 'ops['max_length']' tensors of shape (ops['batch_size'], frame_size)
-    # x = tf.split(0, ops['max_length'], x)
-    
-    # lstm cell
-    lstm_cell = rnn_cell.BasicLSTMCell(ops['n_hidden'], forget_bias=1.0)
-    
-    # get lstm_cell's output
-    # dynamic_rnn return by default: 
-    #   outputs: [batch_size, max_time, cell.output_size]
-      
-    outputs, states = tf.nn.dynamic_rnn(
-                                lstm_cell, 
-                                x, 
-                                dtype=tf.float32,
-                                sequence_length=seq_length)
-    
-    #linear activation, using rnn innter loop last output
-    output_projection = lambda x: tf.matmul(x, W['out']) + b['out']
-    return map_fn(output_projection, outputs)
-
-
-pred = RNN(x, W, b)
-
-# Loss and optimizer
-cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(pred, y))
-optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(cost)
-
-# Evaluate the model
-correct_pred = tf.equal(tf.argmax(pred,1), tf.argmax(y,1))
-accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
-
-# Initialize the variables
-init = tf.global_variables_initializer()
-
-
-
-
-
-
-train_set, valid_set, test_set = dh.load_data('data/reddit_test/reddit', sort_by_len=True)    
-print "Loaded the set: train({}), valid({}), test({})".format(len(train_set),
-                                                                len(valid_set),
-                                                                  len(test_set))
-
-
-
+# extend weights/bias inits to support differet init distributions
+# accuracy on train, test, val sets
 
 # Sources:
 # http://www.wildml.com/2016/08/rnns-in-tensorflow-a-practical-guide-and-undocumented-features/
@@ -106,13 +53,69 @@ print "Loaded the set: train({}), valid({}), test({})".format(len(train_set),
 # http://r2rt.com/recurrent-neural-networks-in-tensorflow-iii-variable-length-sequences.html
 # https://danijar.com/variable-sequence-lengths-in-tensorflow/
 
-# TODO what's up with batch_size - always 4?
-# Launch the graph
+# order of information from load_data
+X = 0
+XT = 1
+Y = 2
+YT = 3
+# Model parameters
+ops = {
+            'epochs': 300, 
+            'frame_size': 3,
+            'n_hidden': 50,
+            'n_classes': 50,
+            'learning_rate': 0.001,
+            'batch_size': 64,
+            'max_length': 400,
+            'encoder': 'LSTM',
+            'dataset': 'data/reddit/reddit'
+          }
+
+# load the dataset
+train_set, valid_set, test_set = DH.load_data(ops['dataset'], sort_by_len=True)    
+print "Loaded the set: train({}), valid({}), test({})".format(len(train_set),
+                                                                len(valid_set),
+                                                                  len(test_set))
+
+# Restart the graph
+tf.reset_default_graph()
+# Graph placeholders
+seq_length = tf.placeholder(tf.int32)
+x = TCH.input_placeholder(max_length_seq=ops['max_length'], 
+                            frame_size=ops['frame_size'])
+
+y = TCH.output_placeholder(max_length_seq=ops['max_length'], 
+                            number_of_classes=ops['n_classes'])
+# Graph weights
+W = {'out': TCH.weights_init(n_input=ops['n_hidden'], 
+                                n_output=ops['n_classes'])}
+b = {'out': TCH.bias_init(
+                    ops['n_classes'])}
+
+
+# predict using encoder
+if ops['encoder'] == 'LSTM':
+    pred = TCH.RNN(x, W['out'], b['out'], seq_length, ops['n_hidden'])
+else:
+    print "Not yet"
+# Loss and optimizer (automatically updates all of the weights)
+cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(pred, y))
+optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(cost) 
+
+# Evaluate the model
+correct_pred = tf.equal(tf.argmax(pred,1), tf.argmax(y,1))
+accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+
+
+# Initialize the variables
+init = tf.global_variables_initializer()
+
+
 with tf.Session() as sess:
     sess.run(init)
     epoch = 0
     while epoch < ops['epochs']:
-        train_batch_indices = dh.get_minibatches_ids(len(train_set), ops['batch_size'], shuffle=True)
+        train_batch_indices = DH.get_minibatches_ids(len(train_set), ops['batch_size'], shuffle=True)
         epoch += 1
         for batch_indeces in train_batch_indices:
             #print batch_indeces
@@ -124,14 +127,20 @@ with tf.Session() as sess:
             batch_yt = [train_set[i][YT] for i in batch_indeces]
             # print np.array(batch_x).shape, batch_x
             # pad minibatch
-            batch_x, batch_xt, batch_y, batch_yt, mask, batch_maxlen = dh.prepare_data(
+            batch_x, batch_xt, batch_y, batch_yt, mask, batch_maxlen = DH.prepare_data(
                                                                             batch_x, 
                                                                             batch_xt, 
                                                                             batch_y, 
                                                                             batch_yt, 
-                                                                            ops['max_length'], 
-                                                                            ops['max_length'])
+                                                                            maxlen=ops['max_length'], 
+                                                                            extended_len=ops['max_length'])
             # make an input set of dimensions (batch_size, max_length, frame_size)
             x_set = np.array([batch_x, batch_xt, batch_yt]).transpose([1,2,0])
-            _, fetched_cost, fetched_accuracy = sess.run([optimizer, cost, accuracy], feed_dict={x: x_set, y: dh.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), seq_length: batch_maxlen})
-            print fetched_cost, fetched_accuracy
+            _, fetched_cost, fetched_accuracy = sess.run(
+                                                    [optimizer, cost, accuracy], 
+                                                    feed_dict={
+                                                                x: x_set, 
+                                                                y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
+                                                                seq_length: batch_maxlen})
+
+            print "Loss: {}, \tAcc:{}".format(fetched_cost, fetched_accuracy)
