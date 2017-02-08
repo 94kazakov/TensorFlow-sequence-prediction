@@ -4,6 +4,7 @@ import numpy as np
 import data_help as DH
 
 
+
 def input_placeholder(max_length_seq=100, 
                         frame_size=3):
     
@@ -28,18 +29,38 @@ def bias_init(n_output):
     b = tf.Variable(tf.random_normal([n_output]))
     return b
 
-def RNN(x, W_tensor, b_tensor, seq_length_tensor, n_hidden):
-    """
-    Prepare data shape to match 'rnn' function req-s
-    Current data input shape: (ops['max_length'], ops['batch_size'], frame_size)
-    Required shape: 'ops['max_length']' tensors list of shape (ops['batch_size'], frame_size)
-    """
+def errors_and_losses(sess, T_x, T_y, T_len, T_accuracy,  T_cost, dataset_names, datasets, ops):
+    # passes all needed tensor placeholders to fill with passed datasets
+    # computers errors and losses for train/test/validation sets
+    # Depending on what T_accuracy, T_cost are, different nets can be called
+    accuracy_entry = []
+    losses_entry = []
+    for i in range(len(dataset_names)):
+        dataset = datasets[i]
+        dataset_name = dataset_names[i]
+        batch_indeces_arr = DH.get_minibatches_ids(len(dataset), ops['batch_size'], shuffle=True)
 
-    # Reshaping to (ops['max_length']*ops['batch_size'], frame_size)
-    # x = tf.reshape(x, [-1, ops['frame_size']])
-    # # Split to get a list of 'ops['max_length']' tensors of shape (ops['batch_size'], frame_size)
-    # x = tf.split(0, ops['max_length'], x)
+        acc_avg = 0.0
+        loss_avg = 0.0
+        for batch_ids in batch_indeces_arr:
+            x_set, batch_y, batch_maxlen, mask = DH.pick_batch(
+                                            dataset = dataset,
+                                            batch_indeces = batch_ids, 
+                                            max_length = ops['max_length']) 
+            print batch_maxlen
+            accuracy_batch, cost_batch = sess.run([T_accuracy, T_cost],
+                                                    feed_dict={
+                                                        T_x: x_set, 
+                                                        T_y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
+                                                        T_len: batch_maxlen})
+            acc_avg += accuracy_batch
+            loss_avg += cost_batch
+        accuracy_entry.append(acc_avg/len(batch_indeces_arr))
+        losses_entry.append(cost_batch/len(batch_indeces_arr))
+    return accuracy_entry, losses_entry
     
+
+def RNN(x, T_W, T_b, T_seq_length, n_hidden):
     # lstm cell
     lstm_cell = rnn_cell.BasicLSTMCell(n_hidden, forget_bias=1.0)
     
@@ -51,10 +72,12 @@ def RNN(x, W_tensor, b_tensor, seq_length_tensor, n_hidden):
                                 lstm_cell, 
                                 x, 
                                 dtype=tf.float32,
-                                sequence_length=seq_length_tensor)
+                                sequence_length=T_seq_length)
     
-    #linear activation, using rnn innter loop last output
-    output_projection = lambda x: tf.nn.relu(tf.matmul(x, W_tensor) + b_tensor)
+    # linear activation, using rnn innter loop last output
+    # project into class space: x-[max_time, hidden_units], T_W-[hidden_units, n_classes]
+    output_projection = lambda x: tf.nn.relu(tf.matmul(x, T_W) + T_b)
+    
     return tf.python.map_fn(output_projection, outputs)
 
 

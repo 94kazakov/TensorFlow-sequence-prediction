@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import random
+import os
 
 """
 # TODO:
@@ -10,7 +11,12 @@ import random
 # 
 """
 
-
+# order of information from load_data
+X = 0
+XT = 1
+Y = 2
+YT = 3
+# pbd: b[line#], c, !<expr>, p <name>
 
 def read_file_time_sequences(fname):
     sequences = []
@@ -101,9 +107,12 @@ def prepare_data(ox, oxt, oy, oyt, maxlen=None, extended_len=0):
     Returns: padded data & mask that tells us which are fake
             (n_steps, batch_size) for everything
     """
+    
     lengths = [len(seq) for seq in ox]
-    # discard if too long
+    # cut if too long
     if maxlen > 0:
+
+
         new_lengths = []
         new_ox = []
         new_oxt = []
@@ -116,14 +125,21 @@ def prepare_data(ox, oxt, oy, oyt, maxlen=None, extended_len=0):
                 new_oxt.append(loxt)
                 new_oy.append(loy)
                 new_oyt.append(loyt)
+            else:
+                new_lengths.append(maxlen)
+                new_ox.append(lox[0:maxlen])
+                new_oxt.append(loxt[0:maxlen])
+                new_oy.append(loy[0:maxlen])
+                new_oyt.append(loyt[0:maxlen])
+
         lengths = new_lengths
         ox = new_ox
         oxt = new_oxt
         oy = new_oy
         oyt = new_oyt
-    
-    
+
     maxlen = np.max(lengths)
+
 
     # extend to maximal length, TODO: remove
     if extended_len != 0:
@@ -143,9 +159,31 @@ def prepare_data(ox, oxt, oy, oyt, maxlen=None, extended_len=0):
         y[i, :lengths[i]] = oy[i]
         yt[i, :lengths[i]] = oyt[i]
         x_mask[i, :lengths[i]] = 1.0
-         
-    return x, xt, y, yt, x_mask, maxlen
+    # return actual maxlength to know when to stop computing (np.max(lengths))
+    return x, xt, y, yt, x_mask, np.max(lengths)
 
+def pick_batch(dataset, batch_indeces, max_length):
+    # Pick datapoints according to batch_indeces, 
+    # format the data 
+
+    # select examples from train set that correspond to each minibatch
+    batch_x = [dataset[i][X] for i in batch_indeces]
+    batch_xt = [dataset[i][XT] for i in batch_indeces]
+    batch_y = [dataset[i][Y] for i in batch_indeces]
+    batch_yt = [dataset[i][YT] for i in batch_indeces]
+    # print np.array(batch_x).shape, batch_x
+    # pad minibatch
+    batch_x, batch_xt, batch_y, batch_yt, mask, batch_maxlen = prepare_data(
+                                                                    batch_x, 
+                                                                    batch_xt, 
+                                                                    batch_y, 
+                                                                    batch_yt, 
+                                                                    maxlen=max_length, 
+                                                                    extended_len=max_length)
+    # make an input set of dimensions (batch_size, max_length, frame_size)
+    x_set = np.array([batch_x, batch_xt, batch_yt]).transpose([1,2,0])
+    
+    return x_set, batch_y, batch_maxlen, mask
 
 def embed_one_hot(batch_array, depth, length):
     """
@@ -154,10 +192,12 @@ def embed_one_hot(batch_array, depth, length):
     """
     batch_array = np.array(batch_array)
     batch_size, _ = batch_array.shape
-    
+    find_first_zero = lambda arr: np.where(np.array(arr) == 0)[0][0]
     one_hot_matrix = np.zeros((batch_size, length, depth))
     for i,array in enumerate(batch_array):
-        array = [x - 1 for x in array]
+        # only put ones until the first padded element in current array
+        first_zero_id = find_first_zero(array)
+        array = [array[j] - 1 for j in range(0, first_zero_id)]
         one_hot_matrix[i, np.arange(len(array)), array] = 1
     return one_hot_matrix
 
@@ -167,5 +207,19 @@ def length(sequence):
     length = tf.cast(length, tf.int32)
     return length
 
+def write_history(entry, filename, epoch, overwrite):
+    # check if file exists and remove if it does
+    # make a new file on the first epoch
+    # append to that file
+    if epoch == 1 and overwrite:
+        try:
+            print "deleted:", filename
+            os.remove(filename)
+        except OSError:
+            pass
+        open(filename, 'a').close()
+
+    with open(filename, "a") as myfile:
+        myfile.write(str(entry).strip('[').strip(']') + '\n')
     
 

@@ -36,16 +36,11 @@ tensor_classes_helpers:
 
 """
 
-# load data
-# find ids for randomizing data - TODO with shuffle=True flag from tf
-# mask each batch - TODO with tf.train.batch(...pad..=True)
-# how to avoid making placeholders of fixed size for time?
-# TODO: add sigmoid activation to output product
+# # find ids for randomizing data - TODO with shuffle=True flag from tf
+# # mask each batch - TODO with tf.train.batch(...pad..=True)
 # Make sure padding works (to ignore 0's during accuracy and loss count)
-# Code Bayesian. 
-# Abstract RNN into a separate class (make sure we can connect layer upon layer)
-# extend weights/bias inits to support differet init distributions
-# accuracy on train, test, val sets
+# Right now placeholders are length size (400) and I just specify what's the max lengths of sequences using T_l into the LSTM cell
+# See distributions of weights over time & their activations
 
 # Sources:
 # http://www.wildml.com/2016/08/rnns-in-tensorflow-a-practical-guide-and-undocumented-features/
@@ -53,12 +48,9 @@ tensor_classes_helpers:
 # http://r2rt.com/recurrent-neural-networks-in-tensorflow-iii-variable-length-sequences.html
 # https://danijar.com/variable-sequence-lengths-in-tensorflow/
 
-# order of information from load_data
-X = 0
-XT = 1
-Y = 2
-YT = 3
+
 # Model parameters
+logs_path = '/Users/denis/Documents/hawkes/logs/run1'
 ops = {
             'epochs': 300, 
             'frame_size': 3,
@@ -68,7 +60,8 @@ ops = {
             'batch_size': 64,
             'max_length': 400,
             'encoder': 'LSTM',
-            'dataset': 'data/reddit/reddit'
+            'dataset': 'data/reddit_test/reddit',
+            'overwrite': True
           }
 
 # load the dataset
@@ -80,11 +73,11 @@ print "Loaded the set: train({}), valid({}), test({})".format(len(train_set),
 # Restart the graph
 tf.reset_default_graph()
 # Graph placeholders
-seq_length = tf.placeholder(tf.int32)
-x = TCH.input_placeholder(max_length_seq=ops['max_length'], 
+P_len = tf.placeholder(tf.int32)
+P_x = TCH.input_placeholder(max_length_seq=ops['max_length'], 
                             frame_size=ops['frame_size'])
 
-y = TCH.output_placeholder(max_length_seq=ops['max_length'], 
+P_y = TCH.output_placeholder(max_length_seq=ops['max_length'], 
                             number_of_classes=ops['n_classes'])
 # Graph weights
 W = {'out': TCH.weights_init(n_input=ops['n_hidden'], 
@@ -95,52 +88,68 @@ b = {'out': TCH.bias_init(
 
 # predict using encoder
 if ops['encoder'] == 'LSTM':
-    pred = TCH.RNN(x, W['out'], b['out'], seq_length, ops['n_hidden'])
+    T_pred = TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'])
 else:
     print "Not yet"
 # Loss and optimizer (automatically updates all of the weights)
-cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(pred, y))
-optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(cost) 
+# want to use mask to disregard information from padded data
+T_cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(T_pred, P_y))
+T_optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(T_cost) 
 
 # Evaluate the model
-correct_pred = tf.equal(tf.argmax(pred,1), tf.argmax(y,1))
-accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+T_correct_pred = tf.equal(tf.argmax(T_pred,2), tf.argmax(P_y,2))
+T_accuracy = tf.reduce_mean(tf.cast(T_correct_pred, tf.float32))
 
+tf.summary.scalar('T_cost', T_cost)
+tf.summary.scalar('accuracy', T_accuracy)
+T_summary_op = tf.summary.merge_all()
 
 # Initialize the variables
 init = tf.global_variables_initializer()
 
 
-with tf.Session() as sess:
-    sess.run(init)
+
+with tf.Session() as T_sess:
+    T_sess.run(init)
+    writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph())
+
     epoch = 0
+    counter = 0
     while epoch < ops['epochs']:
         train_batch_indices = DH.get_minibatches_ids(len(train_set), ops['batch_size'], shuffle=True)
         epoch += 1
         for batch_indeces in train_batch_indices:
-            #print batch_indeces
-            # select examples from train set that correspond to each minibatch
-            
-            batch_x = [train_set[i][X] for i in batch_indeces]
-            batch_xt = [train_set[i][XT] for i in batch_indeces]
-            batch_y = [train_set[i][Y] for i in batch_indeces]
-            batch_yt = [train_set[i][YT] for i in batch_indeces]
-            # print np.array(batch_x).shape, batch_x
-            # pad minibatch
-            batch_x, batch_xt, batch_y, batch_yt, mask, batch_maxlen = DH.prepare_data(
-                                                                            batch_x, 
-                                                                            batch_xt, 
-                                                                            batch_y, 
-                                                                            batch_yt, 
-                                                                            maxlen=ops['max_length'], 
-                                                                            extended_len=ops['max_length'])
-            # make an input set of dimensions (batch_size, max_length, frame_size)
-            x_set = np.array([batch_x, batch_xt, batch_yt]).transpose([1,2,0])
-            _, fetched_cost, fetched_accuracy = sess.run(
-                                                    [optimizer, cost, accuracy], 
-                                                    feed_dict={
-                                                                x: x_set, 
-                                                                y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
-                                                                seq_length: batch_maxlen})
+            counter += 1
 
-            print "Loss: {}, \tAcc:{}".format(fetched_cost, fetched_accuracy)
+            x_set, batch_y, batch_maxlen, mask = DH.pick_batch(
+                                                dataset = train_set,
+                                                batch_indeces = batch_indeces, 
+                                                max_length = ops['max_length'])            
+            _, summary = T_sess.run(
+                                                    [T_optimizer, T_summary_op], 
+                                                    feed_dict={
+                                                                P_x: x_set, 
+                                                                P_y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
+                                                                P_len: batch_maxlen})
+
+
+            # writer.add_summary(summary, counter)
+
+        # Evaluating model at each epoch
+        datasets = [train_set, test_set, valid_set]
+        dataset_names = ['train', 'test', 'valid']
+        
+        accuracy_entry, losses_entry = TCH.errors_and_losses(T_sess, P_x, P_y, 
+                                                            P_len, T_accuracy, T_cost, 
+                                                            dataset_names, datasets, ops)
+        print accuracy_entry, losses_entry
+        DH.write_history(accuracy_entry, 'records/acc.txt', epoch, ops['overwrite'])
+        DH.write_history(losses_entry, 'records/loss.txt', epoch, ops['overwrite'])
+        
+        
+
+
+
+
+
+
