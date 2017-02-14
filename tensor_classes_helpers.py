@@ -29,7 +29,7 @@ def bias_init(n_output):
     b = tf.Variable(tf.random_normal([n_output]))
     return b
 
-def errors_and_losses(sess, T_x, T_y, T_len, T_accuracy,  T_cost, dataset_names, datasets, ops):
+def errors_and_losses(sess, P_x, P_y, P_len, P_mask, T_accuracy,  T_cost, dataset_names, datasets, ops):
     # passes all needed tensor placeholders to fill with passed datasets
     # computers errors and losses for train/test/validation sets
     # Depending on what T_accuracy, T_cost are, different nets can be called
@@ -50,9 +50,10 @@ def errors_and_losses(sess, T_x, T_y, T_len, T_accuracy,  T_cost, dataset_names,
             print batch_maxlen
             accuracy_batch, cost_batch = sess.run([T_accuracy, T_cost],
                                                     feed_dict={
-                                                        T_x: x_set, 
-                                                        T_y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
-                                                        T_len: batch_maxlen})
+                                                        P_x: x_set, 
+                                                        P_y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
+                                                        P_len: batch_maxlen,
+                                                        P_mask: mask})
             acc_avg += accuracy_batch
             loss_avg += cost_batch
         accuracy_entry.append(acc_avg/len(batch_indeces_arr))
@@ -76,8 +77,8 @@ def RNN(x, T_W, T_b, T_seq_length, n_hidden):
     
     # linear activation, using rnn innter loop last output
     # project into class space: x-[max_time, hidden_units], T_W-[hidden_units, n_classes]
-    output_projection = lambda x: tf.nn.relu(tf.matmul(x, T_W) + T_b)
-    
+    output_projection = lambda x: tf.nn.softmax(tf.matmul(x, T_W) + T_b)
+
     return tf.python.map_fn(output_projection, outputs)
 
 

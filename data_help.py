@@ -196,7 +196,9 @@ def embed_one_hot(batch_array, depth, length):
     one_hot_matrix = np.zeros((batch_size, length, depth))
     for i,array in enumerate(batch_array):
         # only put ones until the first padded element in current array
-        first_zero_id = find_first_zero(array)
+        first_zero_id = len(array)
+        if array[-1] == 0:
+            first_zero_id = find_first_zero(array)
         array = [array[j] - 1 for j in range(0, first_zero_id)]
         one_hot_matrix[i, np.arange(len(array)), array] = 1
     return one_hot_matrix

@@ -36,11 +36,10 @@ tensor_classes_helpers:
 
 """
 
-# # find ids for randomizing data - TODO with shuffle=True flag from tf
-# # mask each batch - TODO with tf.train.batch(...pad..=True)
 # Make sure padding works (to ignore 0's during accuracy and loss count)
 # Right now placeholders are length size (400) and I just specify what's the max lengths of sequences using T_l into the LSTM cell
 # See distributions of weights over time & their activations
+# Save model
 
 # Sources:
 # http://www.wildml.com/2016/08/rnns-in-tensorflow-a-practical-guide-and-undocumented-features/
@@ -61,7 +60,9 @@ ops = {
             'max_length': 400,
             'encoder': 'LSTM',
             'dataset': 'data/reddit_test/reddit',
-            'overwrite': True
+            'overwrite': False,
+            'model_save_name': 'LSTM_test',
+            'model_reload': True
           }
 
 # load the dataset
@@ -72,6 +73,8 @@ print "Loaded the set: train({}), valid({}), test({})".format(len(train_set),
 
 # Restart the graph
 tf.reset_default_graph()
+
+
 # Graph placeholders
 P_len = tf.placeholder(tf.int32)
 P_x = TCH.input_placeholder(max_length_seq=ops['max_length'], 
@@ -79,6 +82,8 @@ P_x = TCH.input_placeholder(max_length_seq=ops['max_length'],
 
 P_y = TCH.output_placeholder(max_length_seq=ops['max_length'], 
                             number_of_classes=ops['n_classes'])
+P_mask = tf.placeholder("float", 
+                        [None, ops['max_length']])
 # Graph weights
 W = {'out': TCH.weights_init(n_input=ops['n_hidden'], 
                                 n_output=ops['n_classes'])}
@@ -91,9 +96,22 @@ if ops['encoder'] == 'LSTM':
     T_pred = TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'])
 else:
     print "Not yet"
-# Loss and optimizer (automatically updates all of the weights)
-# want to use mask to disregard information from padded data
-T_cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(T_pred, P_y))
+
+# for y = [None, n_classes]:
+# cross_entropy = tf.reduce_mean(-tf.reduce_sum(y_ * tf.log(y), reduction_indices=[1]))
+
+# mean (batch_size):
+#   reduce_sum(n_steps):
+#       P_mask * (-reduce_sum(classes)):
+#           truth * predicted_distribution
+T_cost = tf.reduce_mean(
+            tf.reduce_sum( 
+                - tf.reduce_sum(
+                    (P_y * tf.log(T_pred)), 
+                reduction_indices=[2]) * P_mask,
+            reduction_indices=[1]))
+
+
 T_optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(T_cost) 
 
 # Evaluate the model
@@ -110,11 +128,19 @@ init = tf.global_variables_initializer()
 
 
 with tf.Session() as T_sess:
-    T_sess.run(init)
+    saver = tf.train.Saver()
+    if ops['model_reload']:
+        new_saver = tf.train.import_meta_graph('saved_models/' + ops['model_save_name'] + '.meta')
+        new_saver.restore(T_sess, tf.train.latest_checkpoint('saved_models/'))
+        print "Model Loaded from " + ops['model_save_name']
+    else:
+        T_sess.run(init)
+        
     writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph())
 
     epoch = 0
     counter = 0
+    print "Format: Train, Test, Valid"
     while epoch < ops['epochs']:
         train_batch_indices = DH.get_minibatches_ids(len(train_set), ops['batch_size'], shuffle=True)
         epoch += 1
@@ -130,19 +156,24 @@ with tf.Session() as T_sess:
                                                     feed_dict={
                                                                 P_x: x_set, 
                                                                 P_y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
-                                                                P_len: batch_maxlen})
+                                                                P_len: batch_maxlen,
+                                                                P_mask: mask})
 
 
-            # writer.add_summary(summary, counter)
+            writer.add_summary(summary, counter)
 
         # Evaluating model at each epoch
         datasets = [train_set, test_set, valid_set]
         dataset_names = ['train', 'test', 'valid']
         
         accuracy_entry, losses_entry = TCH.errors_and_losses(T_sess, P_x, P_y, 
-                                                            P_len, T_accuracy, T_cost, 
+                                                            P_len, P_mask, T_accuracy, T_cost, 
                                                             dataset_names, datasets, ops)
-        print accuracy_entry, losses_entry
+        print "Epoch:{}, Accuracy:{}, Losses:{}".format(epoch, accuracy_entry, losses_entry)
+        
+        if ops['model_save_name'] != None:
+            print "Model Saved as ", ops['model_save_name']
+            saver.save(T_sess, 'saved_models/' + ops['model_save_name'])
         DH.write_history(accuracy_entry, 'records/acc.txt', epoch, ops['overwrite'])
         DH.write_history(losses_entry, 'records/loss.txt', epoch, ops['overwrite'])
         
