@@ -185,13 +185,12 @@ def pick_batch(dataset, batch_indeces, max_length):
     
     return x_set, batch_y, batch_maxlen, mask
 
-def embed_one_hot(batch_array, depth, length):
+def embed_one_hot(batch_array, batch_size, depth, length):
     """
     Input: batch_y of shape (batch_size, n_steps)
     Output: batch_y 1-hot-embedded of shape(batch_size, n_steps, n_classes)
     """
     batch_array = np.array(batch_array)
-    batch_size, _ = batch_array.shape
     find_first_zero = lambda arr: np.where(np.array(arr) == 0)[0][0]
     one_hot_matrix = np.zeros((batch_size, length, depth))
     for i,array in enumerate(batch_array):

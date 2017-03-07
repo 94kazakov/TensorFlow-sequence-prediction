@@ -39,7 +39,6 @@ tensor_classes_helpers:
 # Make sure padding works (to ignore 0's during accuracy and loss count)
 # Right now placeholders are length size (400) and I just specify what's the max lengths of sequences using T_l into the LSTM cell
 # See distributions of weights over time & their activations
-# Save model
 
 # Sources:
 # http://www.wildml.com/2016/08/rnns-in-tensorflow-a-practical-guide-and-undocumented-features/
@@ -58,11 +57,11 @@ ops = {
             'learning_rate': 0.001,
             'batch_size': 64,
             'max_length': 400,
-            'encoder': 'LSTM',
-            'dataset': 'data/reddit_test/reddit',
+            'encoder': 'HPM',
+            'dataset': 'data/reddit/reddit',
             'overwrite': False,
-            'model_save_name': 'LSTM_test',
-            'model_reload': True
+            'model_save_name': None,
+            'model_load_name': None
           }
 
 # load the dataset
@@ -91,11 +90,18 @@ b = {'out': TCH.bias_init(
                     ops['n_classes'])}
 
 
+# params init
+# predict using encoder
+if ops['encoder'] == 'LSTM':
+    params = None
+else:
+    params = TCH.HPM_params_init(ops)
+
 # predict using encoder
 if ops['encoder'] == 'LSTM':
     T_pred = TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'])
 else:
-    print "Not yet"
+    T_pred = tf.transpose(TCH.HPM(P_x, ops, params), [1,0,2])
 
 # for y = [None, n_classes]:
 # cross_entropy = tf.reduce_mean(-tf.reduce_sum(y_ * tf.log(y), reduction_indices=[1]))
@@ -129,13 +135,13 @@ init = tf.global_variables_initializer()
 
 with tf.Session() as T_sess:
     saver = tf.train.Saver()
-    if ops['model_reload']:
-        new_saver = tf.train.import_meta_graph('saved_models/' + ops['model_save_name'] + '.meta')
+    try:
+        new_saver = tf.train.import_meta_graph('saved_models/' + ops['model_load_name'] + '.meta')
         new_saver.restore(T_sess, tf.train.latest_checkpoint('saved_models/'))
-        print "Model Loaded from " + ops['model_save_name']
-    else:
+        print "Model Loaded from " + ops['model_load_name']
+    except:
         T_sess.run(init)
-        
+
     writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph())
 
     epoch = 0
@@ -150,18 +156,18 @@ with tf.Session() as T_sess:
             x_set, batch_y, batch_maxlen, mask = DH.pick_batch(
                                                 dataset = train_set,
                                                 batch_indeces = batch_indeces, 
-                                                max_length = ops['max_length'])            
+                                                max_length = ops['max_length'])
+            # x_set: [batch_size, max_length, frame_size]
             _, summary = T_sess.run(
                                                     [T_optimizer, T_summary_op], 
                                                     feed_dict={
-                                                                P_x: x_set, 
-                                                                P_y: DH.embed_one_hot(batch_y, ops['n_classes'], ops['max_length']), 
+                                                                P_x: x_set,
+                                                                P_y: DH.embed_one_hot(batch_y, ops['batch_size'], ops['n_classes'], ops['max_length']),
                                                                 P_len: batch_maxlen,
                                                                 P_mask: mask})
 
 
             writer.add_summary(summary, counter)
-
         # Evaluating model at each epoch
         datasets = [train_set, test_set, valid_set]
         dataset_names = ['train', 'test', 'valid']
