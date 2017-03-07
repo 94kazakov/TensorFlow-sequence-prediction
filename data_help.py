@@ -182,8 +182,8 @@ def pick_batch(dataset, batch_indeces, max_length):
                                                                     extended_len=max_length)
     # make an input set of dimensions (batch_size, max_length, frame_size)
     x_set = np.array([batch_x, batch_xt, batch_yt]).transpose([1,2,0])
-    
-    return x_set, batch_y, batch_maxlen, mask
+    batch_size = len(batch_indeces)
+    return x_set, batch_y, batch_maxlen, batch_size, mask
 
 def embed_one_hot(batch_array, batch_size, depth, length):
     """

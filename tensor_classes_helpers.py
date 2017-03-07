@@ -3,7 +3,15 @@ from tensorflow.python.ops import rnn, rnn_cell
 import data_help as DH
 import numpy as np
 
-
+"""
+NOTES:
+1) when tensor([a,b,c])*tensor([b,c]) = tensor([a,b,c])
+        tensor([a,b])*tensor([b]) = tensor([a,b])
+        tensor([a,1])*tensor([b]) = tensor([a,b]) - equivalent
+2) dynamics shape vs static:
+        tf.shape(my_tensor)[0] - dynamics (as graph computes) ex: batch_size=current_batch_size
+        my_tensor.get_shape() - static (graph's 'locked in' value) ex: batch_size=?
+"""
 
 def input_placeholder(max_length_seq=100, 
                         frame_size=3):
@@ -43,8 +51,8 @@ def cut_up_x(x_set, ops):
 
     # at this point x,xt,yt : [max_length, batch_size, 1] => collapse
     x = tf.reduce_sum(x, reduction_indices=2)
-    xt = tf.reduce_sum(xt, reduction_indices=2)
-    yt = tf.reduce_sum(yt, reduction_indices=2)
+    #xt = tf.reduce_sum(xt, reduction_indices=2)
+    #yt = tf.reduce_sum(yt, reduction_indices=2)
 
     # one hot embedding of x (previous state)
     x = tf.cast(x, tf.int32) # needs integers for one hot embedding to work
@@ -67,7 +75,7 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, T_accuracy,  T_cost, datase
         acc_avg = 0.0
         loss_avg = 0.0
         for batch_ids in batch_indeces_arr:
-            x_set, batch_y, batch_maxlen, mask = DH.pick_batch(
+            x_set, batch_y, batch_maxlen, batch_size, mask = DH.pick_batch(
                                             dataset = dataset,
                                             batch_indeces = batch_ids, 
                                             max_length = ops['max_length']) 
@@ -76,7 +84,8 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, T_accuracy,  T_cost, datase
                                                         P_x: x_set,
                                                         P_y: DH.embed_one_hot(batch_y, ops['batch_size'], ops['n_classes'], ops['max_length']),
                                                         P_len: batch_maxlen,
-                                                        P_mask: mask})
+                                                        P_mask: mask,
+                                                        P_batch_size: batch_size})
             acc_avg += accuracy_batch
             loss_avg += cost_batch
         accuracy_entry.append(acc_avg/len(batch_indeces_arr))
@@ -131,23 +140,25 @@ def HPM_params_init(ops):
     return params
 
 
+
 # HPM logic:
 # Learn weights of the hawkes' processes.
 # Have multiple timescales for each process that are ready to "kick-in".
 # For a certain event type in whichever time-scale works best => reinitialize c_
 # every new sequence. 
-def HPM(x_set, ops, params):
+def HPM(x_set, ops, params, batch_size):
     # init h, alphas, timescales, mu etc
     # convert x from [batch_size, max_length, frame_size] to
     #               [max_length, batch_size, frame_size]
     # and step over each time_step with _step function
-
     W = params['W']
     timescales = params['timescales']
     n_timescales = params['n_timescales']
     mu = params['mu']
     gamma = params['gamma']
     alpha = params['alpha']
+
+
     # x = [batch_x, batch_xt, batch_yt]
 
 
@@ -172,11 +183,18 @@ def HPM(x_set, ops, params):
         # time passes
         # formula 1
         #TODO: where is mu in Mike's code?
-        return tf.exp((-(h_prev - mu)*(1.0 - tf.exp(-gamma * delta_t)))/gamma -  mu*delta_t)
+        h_prev_tr = tf.transpose(h_prev, [1,0,2])
+        result = tf.exp((-(h_prev_tr - mu)*(1.0 - tf.exp(-gamma * delta_t)))/gamma -  mu*delta_t)
+        # rotate back [n_hid, batch, n_time] -> [batch, n_hid, n_time]
+        return tf.transpose(result, [1,0,2])
 
     def _H(h_prev, delta_t):
         # decay current intensity
-        return mu + tf.exp(-gamma * delta_t) * (h_prev - mu)
+
+        h_prev_tr = tf.transpose(h_prev, [1,0,2]) #[bath_size, n_hid, n_timescales] -> [n_hid, batch_size, n_timescales}
+        # gamma * delta_t: [batch_size, n_timescales]
+        result = mu + tf.exp(-gamma * delta_t) * (h_prev_tr - mu)
+        return tf.transpose(result, [1,0,2])
 
     def _y_hat(z, c):
         # (batch_size, n_hidden, n_timescales)
@@ -185,7 +203,7 @@ def HPM(x_set, ops, params):
         return tf.reduce_sum(z * c, reduction_indices = [2])
 
     def _step(accumulated_vars, input_vars):
-        print accumulated_vars, input_vars
+
         h_, c_, _ = accumulated_vars
         x, xt, yt = input_vars
         # : mask: (batch_size, n_classes
@@ -195,9 +213,8 @@ def HPM(x_set, ops, params):
 
         # 1) event
         # current z, h
-
-        z = _Z(h_, xt) #(batch_size, n_hidden, n_timescales)
         h = _H(h_, xt)
+        z = _Z(h_, xt) #(batch_size, n_hidden, n_timescales)
         # input part:
         event = tf.matmul(x, W['in'])  #:[batch_size, n_classes]*[n_classes, n_hid]
 
@@ -224,15 +241,19 @@ def HPM(x_set, ops, params):
 
 
     x, xt, yt = cut_up_x(x_set, ops)
+    #TODO: how to get shape of dynamic dimension?
+    # batch_size = tf.shape(x)[1]
+
+    print "Batch", batch_size
     # x: [max_length, batch_size, n_classes]
     # xt, yt: [max_length, batch_size, 1]
-    c0 = softmax_init([ops['batch_size'], ops['n_hidden'], n_timescales])
+    c0 = np.full([batch_size, ops['n_hidden'], n_timescales], 0.1, np.float32)
     rval = tf.scan(_step,
                     elems=[x, xt, yt],
                     initializer=[
-                        np.zeros([ops['batch_size'], ops['n_hidden'], n_timescales], np.float32),
+                        np.zeros([batch_size, ops['n_hidden'], n_timescales], np.float32),
                         c0, #TODO c_ initliazation according to our formulas
-                        np.zeros([ops['batch_size'], ops['n_hidden']], np.float32)
+                        np.zeros([batch_size, ops['n_hidden']], np.float32)
                     ] # h, c, yhat
                    )
 
