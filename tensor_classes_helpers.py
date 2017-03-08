@@ -11,6 +11,14 @@ NOTES:
 2) dynamics shape vs static:
         tf.shape(my_tensor)[0] - dynamics (as graph computes) ex: batch_size=current_batch_size
         my_tensor.get_shape() - static (graph's 'locked in' value) ex: batch_size=?
+
+NOTES: (
+1) initializations fiddle with them
+*Lab number: 1b11
+2) make "ensemble", individual examples
+3) new dataset (10% prev=curr, LSTM
+4) symmetric (+ & -) activations (to make learn faster) tanh > sigm
+5) embedding attempt
 """
 
 def input_placeholder(max_length_seq=100, 
@@ -61,7 +69,7 @@ def cut_up_x(x_set, ops):
     # x_vectorized: [max_length, batch_size, n_classes]
     return x_vectorized, xt, yt
 
-def errors_and_losses(sess, P_x, P_y, P_len, P_mask, T_accuracy,  T_cost, dataset_names, datasets, ops):
+def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  T_cost, dataset_names, datasets, ops):
     # passes all needed tensor placeholders to fill with passed datasets
     # computers errors and losses for train/test/validation sets
     # Depending on what T_accuracy, T_cost are, different nets can be called
@@ -82,7 +90,7 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, T_accuracy,  T_cost, datase
             accuracy_batch, cost_batch = sess.run([T_accuracy, T_cost],
                                                     feed_dict={
                                                         P_x: x_set,
-                                                        P_y: DH.embed_one_hot(batch_y, ops['batch_size'], ops['n_classes'], ops['max_length']),
+                                                        P_y: DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length']),
                                                         P_len: batch_maxlen,
                                                         P_mask: mask,
                                                         P_batch_size: batch_size})
@@ -93,20 +101,22 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, T_accuracy,  T_cost, datase
     return accuracy_entry, losses_entry
     
 
-def RNN(x, T_W, T_b, T_seq_length, n_hidden):
-    # TODO change input for LSTM as concatnation vectorx, xt, yt
+def RNN(x_set, T_W, T_b, T_seq_length, n_hidden, ops):
     # lstm cell
     lstm_cell = rnn_cell.BasicLSTMCell(n_hidden, forget_bias=1.0)
     
     # get lstm_cell's output
     # dynamic_rnn return by default: 
-    #   outputs: [batch_size, max_time, cell.output_size]
-      
+    #   outputs: [max_time, batch_size, cell.output_size]
+    x, xt, yt = cut_up_x(x_set, ops)
+
+    x = tf.concat(2, [x, xt, yt]) #[max_time, batch_size, n_hid + 2]
     outputs, states = tf.nn.dynamic_rnn(
                                 lstm_cell, 
                                 x, 
                                 dtype=tf.float32,
-                                sequence_length=T_seq_length)
+                                sequence_length=T_seq_length,
+                                time_major=True)
     
     # linear activation, using rnn innter loop last output
     # project into class space: x-[max_time, hidden_units], T_W-[hidden_units, n_classes]
@@ -126,6 +136,7 @@ def HPM_params_init(ops):
 
     # tensorflow automacally extends dimension of vector to the rest of dimensions
     # as long the last dimensions agree [x,x,a] + [a] = [x+a, x+a, a+a]
+    # TODO: mu - small (1e-3), no softmax for mu, alpha
     mu = softmax_init([n_timescales])
     gamma = 1.0 / timescales
     alpha = softmax_init([n_timescales])
@@ -157,12 +168,13 @@ def HPM(x_set, ops, params, batch_size):
     mu = params['mu']
     gamma = params['gamma']
     alpha = params['alpha']
+    batch_size = tf.cast(batch_size, tf.int32) #cast placeholder into integer
+
 
 
     # x = [batch_x, batch_xt, batch_yt]
 
 
-    # TODO make x a one hot vector
     def _C(prior_of_event, likelyhood):
         # formula 3
         # likelihood, prior, posterior have dimensions:
@@ -247,13 +259,16 @@ def HPM(x_set, ops, params, batch_size):
     print "Batch", batch_size
     # x: [max_length, batch_size, n_classes]
     # xt, yt: [max_length, batch_size, 1]
-    c0 = np.full([batch_size, ops['n_hidden'], n_timescales], 0.1, np.float32)
+    # c0 = np.full([batch_size, ops['n_hidden'], n_timescales], 0.1, np.float32)
     rval = tf.scan(_step,
                     elems=[x, xt, yt],
                     initializer=[
-                        np.zeros([batch_size, ops['n_hidden'], n_timescales], np.float32),
-                        c0, #TODO c_ initliazation according to our formulas
-                        np.zeros([batch_size, ops['n_hidden']], np.float32)
+                        tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),
+                        tf.fill([batch_size, ops['n_hidden'], n_timescales], 0.07142857142),
+                        tf.zeros([batch_size, ops['n_hidden']], tf.float32)
+                        # np.zeros([batch_size, ops['n_hidden'], n_timescales], np.float32),
+                        # c0, #TODO c_ initliazation according to our formulas
+                        # np.zeros([batch_size, ops['n_hidden']], np.float32)
                     ] # h, c, yhat
                    )
 

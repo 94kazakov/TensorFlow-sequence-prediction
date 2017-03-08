@@ -191,6 +191,8 @@ def embed_one_hot(batch_array, batch_size, depth, length):
     Output: batch_y 1-hot-embedded of shape(batch_size, n_steps, n_classes)
     """
     batch_array = np.array(batch_array)
+    if batch_size == 0.0:
+        batch_size = batch_array.shape[0]
     find_first_zero = lambda arr: np.where(np.array(arr) == 0)[0][0]
     one_hot_matrix = np.zeros((batch_size, length, depth))
     for i,array in enumerate(batch_array):
