@@ -58,6 +58,8 @@ def load_data(dir, sort_by_len=True, valid_ratio=0.1):
     
     # make validation set from test set before sorting by length
     valid_n = int(len(train_set)*valid_ratio)
+    if valid_n == 0:
+        valid_n = 1
     random.shuffle(train_set)
     valid_set = train_set[0:valid_n]
     train_set = train_set[valid_n:]

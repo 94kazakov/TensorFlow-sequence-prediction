@@ -1,5 +1,4 @@
 import tensorflow as tf
-from tensorflow.python.ops import rnn, rnn_cell
 import data_help as DH
 import numpy as np
 
@@ -11,9 +10,14 @@ NOTES:
 2) dynamics shape vs static:
         tf.shape(my_tensor)[0] - dynamics (as graph computes) ex: batch_size=current_batch_size
         my_tensor.get_shape() - static (graph's 'locked in' value) ex: batch_size=?
+3) output = tf.py_func(func_of_interest)
+    the output of py_func needs to be returned in order for func_of_interest to ever be "executed"
+4) tf.Print() - not sure how to use. It seems like it still needs to be evaluated with the session.
+5) how to get shape of dynamic dimension? - can't.
 
-NOTES: (
-1) initializations fiddle with them
+Tasks:
+ - figure out NaN's issue
+ - use scopes: https://github.com/llSourcell/tensorflow_demo/blob/master/board.py
 *Lab number: 1b11
 2) make "ensemble", individual examples
 3) new dataset (10% prev=curr, LSTM
@@ -21,24 +25,34 @@ NOTES: (
 5) embedding attempt
 """
 
+def get_tensor_by_name(name):
+    print tf.global_variables()
+    return [v for v in tf.global_variables() if v.name == name][0]
+
 def input_placeholder(max_length_seq=100, 
-                        frame_size=3):
+                        frame_size=3, name=None):
     
     x = tf.placeholder("float", 
                         [None, max_length_seq, 
-                        frame_size]) #None - for dynamic batch sizing
+                        frame_size], name=name) #None - for dynamic batch sizing
     return x
 
 def output_placeholder(max_length_seq=100, 
-                        number_of_classes=50):
+                        number_of_classes=50, name=None):
     
     y = tf.placeholder("float", 
                         [None, max_length_seq,  
-                        number_of_classes])
+                        number_of_classes], name=name)
     return y
 
-def weights_init(n_input, n_output):
-    W = tf.Variable(tf.random_normal([n_input, n_output]))
+def weights_init(n_input, n_output, name=None, positive=False):
+    init_matrix = None
+    if positive:
+        init_matrix = tf.random_uniform([n_input, n_output], minval=0.1, maxval=0.99, dtype=tf.float32)
+    else:
+        init_matrix = tf.random_normal([n_input, n_output])
+
+    W = tf.Variable(init_matrix, name=name)
     return W
 
 def bias_init(n_output):
@@ -53,9 +67,9 @@ def cut_up_x(x_set, ops):
     # x_set: [batch_size, max_length, frame_size]
     x_set = tf.transpose(x_set, [1,0,2])
     x_set = tf.cast(x_set, tf.float32)
-    # x_set: [max_length, batch_size, frame_size]
+    # x_set: [max_length, batch_size, frpoame_size]
     # splits accross 2nd axis, into 3 splits of x_set tensor (very backwards argument arrangement)
-    x, xt, yt = tf.split(2, 3, x_set)
+    x, xt, yt = tf.split(x_set, 3, 2)
 
     # at this point x,xt,yt : [max_length, batch_size, 1] => collapse
     x = tf.reduce_sum(x, reduction_indices=2)
@@ -65,7 +79,7 @@ def cut_up_x(x_set, ops):
     # one hot embedding of x (previous state)
     x = tf.cast(x, tf.int32) # needs integers for one hot embedding to work
     # depth=n_classes, by default 1 for active, 0 inactive, appended as last dimension
-    x_vectorized = tf.one_hot(x, ops['n_classes'])
+    x_vectorized = tf.one_hot(x, ops['n_classes'], name='x_vectorized')
     # x_vectorized: [max_length, batch_size, n_classes]
     return x_vectorized, xt, yt
 
@@ -103,14 +117,14 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  
 
 def RNN(x_set, T_W, T_b, T_seq_length, n_hidden, ops):
     # lstm cell
-    lstm_cell = rnn_cell.BasicLSTMCell(n_hidden, forget_bias=1.0)
-    
+    #lstm_cell = rnn_cell.BasicLSTMCell(n_hidden, forget_bias=1.0)
+    lstm_cell = tf.contrib.rnn.BasicLSTMCell(n_hidden, forget_bias=1.0)
     # get lstm_cell's output
     # dynamic_rnn return by default: 
     #   outputs: [max_time, batch_size, cell.output_size]
     x, xt, yt = cut_up_x(x_set, ops)
 
-    x = tf.concat(2, [x, xt, yt]) #[max_time, batch_size, n_hid + 2]
+    x = tf.concat([x, xt, yt], 2) #[max_time, batch_size, n_hid + 2]
     outputs, states = tf.nn.dynamic_rnn(
                                 lstm_cell, 
                                 x, 
@@ -122,24 +136,31 @@ def RNN(x_set, T_W, T_b, T_seq_length, n_hidden, ops):
     # project into class space: x-[max_time, hidden_units], T_W-[hidden_units, n_classes]
     output_projection = lambda x: tf.nn.softmax(tf.matmul(x, T_W) + T_b)
 
-    return tf.python.map_fn(output_projection, outputs)
+    return tf.map_fn(output_projection, outputs)
 
 
 def HPM_params_init(ops):
+    # W_in: range of each element is from 0 to 1, since each weight is a "probability" for each hidden unit.
+    # W_recurrent:
     W = {'in': weights_init(n_input=ops['n_classes'],
-                            n_output=ops['n_hidden']),
+                            n_output=ops['n_hidden'],
+                            name='W_in',
+                            positive=True),
          'recurrent': weights_init(n_input=ops['n_hidden'],
-                                   n_output=ops['n_hidden'])}
+                                   n_output=ops['n_hidden'],
+                                   name='W_recurrent',
+                                   positive=True)}
 
-    timescales = 2.0 ** np.arange(-7, 7)
+    timescales = 2.0 ** np.arange(1,3)#(-7,7) vs (0, 1)
     n_timescales = len(timescales)
 
     # tensorflow automacally extends dimension of vector to the rest of dimensions
     # as long the last dimensions agree [x,x,a] + [a] = [x+a, x+a, a+a]
     # TODO: mu - small (1e-3), no softmax for mu, alpha
-    mu = softmax_init([n_timescales])
+    mu = tf.random_uniform([n_timescales], minval=1e-4, maxval=1e-3, dtype=tf.float32, name='mu')
     gamma = 1.0 / timescales
-    alpha = softmax_init([n_timescales])
+    alpha = tf.random_uniform([n_timescales], minval=1e-1, maxval=1.0, dtype=tf.float32, name='alpha')
+
     params = {
         'W': W,
         'timescales': timescales,
@@ -157,7 +178,7 @@ def HPM_params_init(ops):
 # Have multiple timescales for each process that are ready to "kick-in".
 # For a certain event type in whichever time-scale works best => reinitialize c_
 # every new sequence. 
-def HPM(x_set, ops, params, batch_size):
+def HPM(x_set, ops, params, batch_size, T_sess):
     # init h, alphas, timescales, mu etc
     # convert x from [batch_size, max_length, frame_size] to
     #               [max_length, batch_size, frame_size]
@@ -172,11 +193,13 @@ def HPM(x_set, ops, params, batch_size):
 
 
 
-    # x = [batch_x, batch_xt, batch_yt]
-
+    def _debugging_function(vals):
+        #print "Inside debugging f-n:"
+        #print vals
+        return False
 
     def _C(prior_of_event, likelyhood):
-        # formula 3
+        # formula 3 - reweight the ensemble
         # likelihood, prior, posterior have dimensions:
         #       [batch_size, n_hid, n_timescales]
         minimum = 1e-5
@@ -191,14 +214,13 @@ def HPM(x_set, ops, params, batch_size):
     def _Z(h_prev, delta_t):
         # delta_t: batch_size x n_timescales
         # h_prev: batch_size x n_hid x n_timescales
-        # Probability of not event occuring at h_prev intensity till delta_t
+        # Probability of no event occuring at h_prev intensity till delta_t
         # time passes
         # formula 1
-        #TODO: where is mu in Mike's code?
         h_prev_tr = tf.transpose(h_prev, [1,0,2])
         result = tf.exp((-(h_prev_tr - mu)*(1.0 - tf.exp(-gamma * delta_t)))/gamma -  mu*delta_t)
         # rotate back [n_hid, batch, n_time] -> [batch, n_hid, n_time]
-        return tf.transpose(result, [1,0,2])
+        return tf.transpose(result, [1,0,2], name='Z')
 
     def _H(h_prev, delta_t):
         # decay current intensity
@@ -206,13 +228,15 @@ def HPM(x_set, ops, params, batch_size):
         h_prev_tr = tf.transpose(h_prev, [1,0,2]) #[bath_size, n_hid, n_timescales] -> [n_hid, batch_size, n_timescales}
         # gamma * delta_t: [batch_size, n_timescales]
         result = mu + tf.exp(-gamma * delta_t) * (h_prev_tr - mu)
-        return tf.transpose(result, [1,0,2])
+        return tf.transpose(result, [1,0,2], name='H')
 
     def _y_hat(z, c):
         # (batch_size, n_hidden, n_timescales)
         # output: (batch_size, n_hidden)
+        # c - timescale probability
+        # z - quantity
         # TODO: remap to some function in valid range
-        return tf.reduce_sum(z * c, reduction_indices = [2])
+        return tf.reduce_sum(z * c, reduction_indices = [2], name='yhat')
 
     def _step(accumulated_vars, input_vars):
 
@@ -228,18 +252,23 @@ def HPM(x_set, ops, params, batch_size):
         h = _H(h_, xt)
         z = _Z(h_, xt) #(batch_size, n_hidden, n_timescales)
         # input part:
-        event = tf.matmul(x, W['in'])  #:[batch_size, n_classes]*[n_classes, n_hid]
+        # TODO: activation function choice experiment
+        # TODO: add bias for _in (initial probability of which event happened bias)
+        event = tf.sigmoid(
+                        tf.matmul(x, W['in']))  #:[batch_size, n_classes]*[n_classes, n_hid]
 
         # recurrent part: since y_hat is for t+1, we wait until here to calculate it rather
         #                   rather than in previous iteration
         y_hat = _y_hat(z, c_) # :(batch_size, n_hidden)
         # TODO: why no bias I forgot?
-        event += tf.matmul(y_hat, W['recurrent'])  #:(batch_size, n_hid)*(n_hid, n_hid)
+        event += tf.sigmoid(
+                        tf.matmul(y_hat, W['recurrent']))  #:(batch_size, n_hid)*(n_hid, n_hid)
 
         # 2) update c
         event = tf.expand_dims(event, 2) # make [batch_size, n_hid] into [batch_size, n_hid, 1]
         # to support multiplication by [batch_size, n_hid, n_timescales]
-        c = event * _C(z*(h + mu), c_) + (1.0 - event) * _C(z, c_) # h^0 = 1
+        # TODO: check Mike's code on c's update
+        c = event * _C(z*h, c_) + (1.0 - event) * _C(z, c_) # h^0 = 1
 
         # 3) update intensity
         h += alpha * event
@@ -253,29 +282,25 @@ def HPM(x_set, ops, params, batch_size):
 
 
     x, xt, yt = cut_up_x(x_set, ops)
-    #TODO: how to get shape of dynamic dimension?
     # batch_size = tf.shape(x)[1]
-
-    print "Batch", batch_size
     # x: [max_length, batch_size, n_classes]
     # xt, yt: [max_length, batch_size, 1]
     # c0 = np.full([batch_size, ops['n_hidden'], n_timescales], 0.1, np.float32)
     rval = tf.scan(_step,
                     elems=[x, xt, yt],
                     initializer=[
-                        tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),
-                        tf.fill([batch_size, ops['n_hidden'], n_timescales], 0.07142857142),
-                        tf.zeros([batch_size, ops['n_hidden']], tf.float32)
-                        # np.zeros([batch_size, ops['n_hidden'], n_timescales], np.float32),
-                        # c0, #TODO c_ initliazation according to our formulas
-                        # np.zeros([batch_size, ops['n_hidden']], np.float32)
-                    ] # h, c, yhat
+                        tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32) + mu*2, #h
+                        tf.fill([batch_size, ops['n_hidden'], n_timescales], 1.0/n_timescales), #c
+                        tf.zeros([batch_size, ops['n_hidden']], tf.float32) # yhat
+
+                    ]
                    )
 
-
-
-
+    #debug_print_op = tf.py_func(_debugging_function, [[mu, alpha]], [tf.bool])
     #return predictions
-    print "predictions:", rval[2] #[max_length, batch_size, n_hid] - at this point we have
+    #rval[2]: [max_length, batch_size, n_hid] - at this point we have
     # all the intensities [n_hid] telling us which event is most likely to fire.
+
+    #tf.summary.histogram('y_hat', rval[2])
     return rval[2]
+    # return [rval[2], debug_print_op]
