@@ -53,15 +53,15 @@ tensor_classes_helpers:
 # Model parameters
 logs_path = '/Users/denis/Documents/hawkes/logs/run1'
 ops = {
-            'epochs': 50,
+            'epochs': 300,
             'frame_size': 3,
-            'n_hidden': 9,
-            'n_classes': 9,
+            'n_hidden': 50,
+            'n_classes': 50,
             'learning_rate': 0.001,
-            'batch_size': 1,
-            'max_length': 9,
+            'batch_size': 64,
+            'max_length': 50,
             'encoder': 'HPM',
-            'dataset': 'data/reddit_small_test/reddit',
+            'dataset': 'data/reddit_test/reddit',
             'overwrite': False,
             'model_save_name': None,
             'model_load_name': None,
@@ -106,7 +106,7 @@ else:
 if ops['encoder'] == 'LSTM':
     T_pred = tf.transpose(TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'], ops), [1,0,2])
 else:
-    T_pred = tf.transpose(TCH.HPM(P_x, ops, params, P_batch_size, T_sess), [1,0,2])
+    T_pred, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
 
     #T_pred, debugging_val = TCH.HPM(P_x, ops, params, P_batch_size)
     #T_pred = tf.transpose(T_pred, [1,0,2])
@@ -172,14 +172,28 @@ while epoch < ops['epochs']:
                                             max_length = ops['max_length'])
         # x_set: [batch_size, max_length, frame_size]
 
-        _, summary = T_sess.run(
-                                                [T_optimizer, T_summary_op],
+        _, summary, deb_var = T_sess.run(
+                                                [T_optimizer, T_summary_op, debugging_stuff],
                                                 feed_dict={
                                                             P_x: x_set,
                                                             P_y: DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length']),
                                                             P_len: batch_maxlen,
                                                             P_mask: mask,
                                                             P_batch_size: batch_size})
+        #import pdb; pdb.set_trace()
+        #print pred
+        # T_sess.run(
+        #     [TCH._step],
+        #     feed_dict={
+        #         P_x: [[[1, 1, 2, 3, 1, 4, 1, 1, 1],
+        #                [0.00000, 0.94681, 35.00047, 2.82917, 10.17781, 1.39126, 5.88494, 9.74331, 3.19285],
+        #                [1, 2, 3, 1, 4, 1, 1, 1, 1]]],
+        #         P_y: DH.embed_one_hot(
+        #             [0.94681, 35.00047, 2.82917, 10.17781, 1.39126, 5.88494, 9.74331, 3.19285, 21.74557], 0.0,
+        #             ops['n_classes'], ops['max_length']),
+        #         P_len: 9,
+        #         P_mask: [[1, 1, 1, 1, 1, 1, 1, 1, 1]],
+        #         P_batch_size: 1})
 
         writer.add_summary(summary, counter)
     # Evaluating model at each epoch

@@ -14,9 +14,11 @@ NOTES:
     the output of py_func needs to be returned in order for func_of_interest to ever be "executed"
 4) tf.Print() - not sure how to use. It seems like it still needs to be evaluated with the session.
 5) how to get shape of dynamic dimension? - can't.
+6) start: tensorboard --logdir=run1:logs/run1/ --port 6006
 
 Tasks:
  - figure out NaN's issue
+ - how to access variable by name?  (ex: I want to retrieve a named variable)
  - use scopes: https://github.com/llSourcell/tensorflow_demo/blob/master/board.py
 *Lab number: 1b11
 2) make "ensemble", individual examples
@@ -26,7 +28,7 @@ Tasks:
 """
 
 def get_tensor_by_name(name):
-    print tf.global_variables()
+    print tf.all_variables()
     return [v for v in tf.global_variables() if v.name == name][0]
 
 def input_placeholder(max_length_seq=100, 
@@ -45,18 +47,21 @@ def output_placeholder(max_length_seq=100,
                         number_of_classes], name=name)
     return y
 
-def weights_init(n_input, n_output, name=None, positive=False):
+def weights_init(n_input, n_output, name=None, small=True):
     init_matrix = None
-    if positive:
-        init_matrix = tf.random_uniform([n_input, n_output], minval=0.1, maxval=0.99, dtype=tf.float32)
+    if small:
+        init_matrix = tf.random_normal([n_input, n_output], stddev=0.01)
     else:
         init_matrix = tf.random_normal([n_input, n_output])
-
     W = tf.Variable(init_matrix, name=name)
     return W
 
-def bias_init(n_output):
-    b = tf.Variable(tf.random_normal([n_output]))
+def bias_init(n_output, name=None, small=True):
+    b = None
+    if small:
+        b = tf.Variable(tf.random_normal([n_output], mean=0.1, stddev = 0.01), name=name)
+    else:
+        b = tf.Variable(tf.random_normal([n_output]), name=name)
     return b
 
 def softmax_init(shape):
@@ -144,25 +149,40 @@ def HPM_params_init(ops):
     # W_recurrent:
     W = {'in': weights_init(n_input=ops['n_classes'],
                             n_output=ops['n_hidden'],
-                            name='W_in',
-                            positive=True),
+                            name='W_in'),
          'recurrent': weights_init(n_input=ops['n_hidden'],
                                    n_output=ops['n_hidden'],
                                    name='W_recurrent',
-                                   positive=True)}
+                                   small=False),
+         'out':  weights_init(n_input=ops['n_hidden'],
+                                   n_output=ops['n_classes'],
+                                   name='W_out')
+         }
 
-    timescales = 2.0 ** np.arange(1,3)#(-7,7) vs (0, 1)
+    b = {'in': bias_init(n_output=ops['n_hidden'],
+                         name='b_in',
+                         small=False),
+         'recurrent': bias_init(n_output=ops['n_hidden'],
+                         name='b_recurrent',
+                         small=False),
+         'out': bias_init(n_output=ops['n_classes'],
+                         name='b_out',
+                         small=False)
+        }
+
+    timescales = 2.0 ** np.arange(-7,7)#(-7,7) vs (0, 1)
     n_timescales = len(timescales)
 
     # tensorflow automacally extends dimension of vector to the rest of dimensions
     # as long the last dimensions agree [x,x,a] + [a] = [x+a, x+a, a+a]
-    # TODO: mu - small (1e-3), no softmax for mu, alpha
+
     mu = tf.random_uniform([n_timescales], minval=1e-4, maxval=1e-3, dtype=tf.float32, name='mu')
     gamma = 1.0 / timescales
     alpha = tf.random_uniform([n_timescales], minval=1e-1, maxval=1.0, dtype=tf.float32, name='alpha')
 
     params = {
         'W': W,
+        'b': b,
         'timescales': timescales,
         'n_timescales': n_timescales,
         'mu': mu,
@@ -178,12 +198,13 @@ def HPM_params_init(ops):
 # Have multiple timescales for each process that are ready to "kick-in".
 # For a certain event type in whichever time-scale works best => reinitialize c_
 # every new sequence. 
-def HPM(x_set, ops, params, batch_size, T_sess):
+def HPM(x_set, ops, params, batch_size):
     # init h, alphas, timescales, mu etc
     # convert x from [batch_size, max_length, frame_size] to
     #               [max_length, batch_size, frame_size]
     # and step over each time_step with _step function
     W = params['W']
+    b = params['b']
     timescales = params['timescales']
     n_timescales = params['n_timescales']
     mu = params['mu']
@@ -235,12 +256,11 @@ def HPM(x_set, ops, params, batch_size, T_sess):
         # output: (batch_size, n_hidden)
         # c - timescale probability
         # z - quantity
-        # TODO: remap to some function in valid range
         return tf.reduce_sum(z * c, reduction_indices = [2], name='yhat')
 
     def _step(accumulated_vars, input_vars):
 
-        h_, c_, _ = accumulated_vars
+        h_, c_, _, _ = accumulated_vars
         x, xt, yt = input_vars
         # : mask: (batch_size, n_classes
         # : x - vectorized x: (batch_size, n_classes)
@@ -253,17 +273,17 @@ def HPM(x_set, ops, params, batch_size, T_sess):
         z = _Z(h_, xt) #(batch_size, n_hidden, n_timescales)
         # input part:
         # TODO: activation function choice experiment
-        # TODO: add bias for _in (initial probability of which event happened bias)
         event = tf.sigmoid(
-                        tf.matmul(x, W['in']))  #:[batch_size, n_classes]*[n_classes, n_hid]
+                        tf.matmul(x, W['in']) + b['in'])  #:[batch_size, n_classes]*[n_classes, n_hid]
 
         # recurrent part: since y_hat is for t+1, we wait until here to calculate it rather
         #                   rather than in previous iteration
         y_hat = _y_hat(z, c_) # :(batch_size, n_hidden)
-        # TODO: why no bias I forgot?
-        event += tf.sigmoid(
-                        tf.matmul(y_hat, W['recurrent']))  #:(batch_size, n_hid)*(n_hid, n_hid)
 
+        event += tf.sigmoid(
+                        tf.matmul(y_hat, W['recurrent']) + b['recurrent'])  #:(batch_size, n_hid)*(n_hid, n_hid)
+
+        event = tf.clip_by_value(event, 0, 1) # TODO: how does Mike avoid this?
         # 2) update c
         event = tf.expand_dims(event, 2) # make [batch_size, n_hid] into [batch_size, n_hid, 1]
         # to support multiplication by [batch_size, n_hid, n_timescales]
@@ -278,7 +298,8 @@ def HPM(x_set, ops, params, batch_size, T_sess):
         h_hat = _H(h, yt)
 
         y_predict = _y_hat(z_hat, c)
-        return [h, c, y_predict]
+        return [h, c, y_predict, event]
+
 
 
     x, xt, yt = cut_up_x(x_set, ops)
@@ -291,10 +312,11 @@ def HPM(x_set, ops, params, batch_size, T_sess):
                     initializer=[
                         tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32) + mu*2, #h
                         tf.fill([batch_size, ops['n_hidden'], n_timescales], 1.0/n_timescales), #c
-                        tf.zeros([batch_size, ops['n_hidden']], tf.float32) # yhat
+                        tf.zeros([batch_size, ops['n_hidden']], tf.float32), # yhat
+                        tf.zeros([batch_size, ops['n_hidden'], 1]) #dbugging placeholder
 
                     ]
-                   )
+                   , name='hpm/scan')
 
     #debug_print_op = tf.py_func(_debugging_function, [[mu, alpha]], [tf.bool])
     #return predictions
@@ -302,5 +324,7 @@ def HPM(x_set, ops, params, batch_size, T_sess):
     # all the intensities [n_hid] telling us which event is most likely to fire.
 
     #tf.summary.histogram('y_hat', rval[2])
-    return rval[2]
-    # return [rval[2], debug_print_op]
+    hidden_prediction = tf.transpose(rval[2], [1, 0, 2]) # -> [batch_size, n_steps, n_classes]
+    output_projection = lambda x: tf.nn.softmax(tf.matmul(x, W['out']) + b['out']) + 1e-6
+
+    return tf.map_fn(output_projection, hidden_prediction), rval[3]
