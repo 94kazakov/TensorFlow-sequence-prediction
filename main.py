@@ -53,17 +53,17 @@ tensor_classes_helpers:
 # Model parameters
 logs_path = '/Users/denis/Documents/hawkes/logs/run1'
 ops = {
-            'epochs': 300,
+            'epochs': 200,
             'frame_size': 3,
             'n_hidden': 50,
             'n_classes': 50,
             'learning_rate': 0.001,
             'batch_size': 64,
-            'max_length': 50,
+            'max_length': 300,
             'encoder': 'HPM',
-            'dataset': 'data/reddit_test/reddit',
+            'dataset': 'data/reddit/reddit',
             'overwrite': False,
-            'model_save_name': None,
+            'model_save_name': "HPM_april4",
             'model_load_name': None,
             'debug_tensorflow': False
           }
@@ -106,7 +106,7 @@ else:
 if ops['encoder'] == 'LSTM':
     T_pred = tf.transpose(TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'], ops), [1,0,2])
 else:
-    T_pred, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
+    T_pred, debugging_stuff, T_summary_weights = TCH.HPM(P_x, ops, params, P_batch_size)
 
     #T_pred, debugging_val = TCH.HPM(P_x, ops, params, P_batch_size)
     #T_pred = tf.transpose(T_pred, [1,0,2])
@@ -135,6 +135,7 @@ T_accuracy = tf.reduce_sum(tf.reduce_sum(tf.cast(T_correct_pred, tf.float32)))/t
 tf.summary.scalar('T_cost', T_cost)
 tf.summary.scalar('accuracy', T_accuracy)
 T_summary_op = tf.summary.merge_all()
+#import pdb; pdb.set_trace()
 
 # Initialize the variables
 init = tf.global_variables_initializer()
@@ -172,8 +173,8 @@ while epoch < ops['epochs']:
                                             max_length = ops['max_length'])
         # x_set: [batch_size, max_length, frame_size]
 
-        _, summary, deb_var = T_sess.run(
-                                                [T_optimizer, T_summary_op, debugging_stuff],
+        _, summary, deb_var, summary_weights = T_sess.run(
+                                                [T_optimizer, T_summary_op, debugging_stuff, T_summary_weights],
                                                 feed_dict={
                                                             P_x: x_set,
                                                             P_y: DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length']),
@@ -196,6 +197,7 @@ while epoch < ops['epochs']:
         #         P_batch_size: 1})
 
         writer.add_summary(summary, counter)
+        writer.add_summary(summary_weights, counter)
     # Evaluating model at each epoch
     datasets = [train_set, test_set, valid_set]
     dataset_names = ['train', 'test', 'valid']
