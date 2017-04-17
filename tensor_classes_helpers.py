@@ -406,20 +406,21 @@ def HPM(x_set, ops, params, batch_size):
     print x
 
     # collect all the variables of interest
-    #TODO: make this an option. this wastes a lot of time during computation
-    tf.summary.histogram('W_in', W['in'], ['W'])
-    tf.summary.histogram('W_rec', W['recurrent'], ['W'])
-    tf.summary.histogram('W_out', W['out'], ['W'])
-    tf.summary.histogram('b_rec', b['recurrent'], ['b'])
-    tf.summary.histogram('b_out', b['out'], ['b'])
-    tf.summary.histogram('c_init', c_init, ['init'])
-    tf.summary.histogram('mu_init', mu, ['init'])
-    tf.summary.histogram('alpha_init', params['alpha'], ['init'])
-    T_summary_weights = tf.summary.merge([
-                            tf.summary.merge_all('W'),
-                            tf.summary.merge_all('b'),
-                            tf.summary.merge_all('init')
-                            ])
+    T_summary_weights = None
+    if ops['collect_histograms']:
+        tf.summary.histogram('W_in', W['in'], ['W'])
+        tf.summary.histogram('W_rec', W['recurrent'], ['W'])
+        tf.summary.histogram('W_out', W['out'], ['W'])
+        tf.summary.histogram('b_rec', b['recurrent'], ['b'])
+        tf.summary.histogram('b_out', b['out'], ['b'])
+        tf.summary.histogram('c_init', c_init, ['init'])
+        tf.summary.histogram('mu_init', mu, ['init'])
+        tf.summary.histogram('alpha_init', params['alpha'], ['init'])
+        T_summary_weights = tf.summary.merge([
+                                tf.summary.merge_all('W'),
+                                tf.summary.merge_all('b'),
+                                tf.summary.merge_all('init')
+                                ])
 
 
     rval = tf.scan(_step,
@@ -444,5 +445,8 @@ def HPM(x_set, ops, params, batch_size):
     # TODO: REMOVE
     output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
     #output_projection = lambda x: tf.clip_by_value(tf.matmul(x, W['out']) + b['out'], 1e-8, 1.0)
-    # TODO: make return a dict that's then assigned depending on what options are chosen?
-    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4], tf.transpose(tf.map_fn(output_projection, hidden_prediction), [1,0,2])]
+    # TODO: is there a way to make this shorter?this is going to be if statements everywhere.
+    if ops['collect_histograms']:
+        return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4], tf.transpose(tf.map_fn(output_projection, hidden_prediction), [1,0,2])]
+    else:
+        return tf.map_fn(output_projection, hidden_prediction), [rval[0], rval[1], rval[2], rval[3], rval[4], tf.transpose(tf.map_fn(output_projection, hidden_prediction), [1,0,2])]

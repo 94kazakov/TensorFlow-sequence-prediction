@@ -66,11 +66,12 @@ ops = {
             'batch_size': 64,
             'max_length': 50,
             'encoder': 'HPM',
-            'dataset': 'data/reddit/reddit',
+            'dataset': 'data/reddit_small_test/reddit',
             'overwrite': False,
             'model_save_name': "HPM_reddit_yhat_switched_april16",
             'model_load_name': None,
-            'debug_tensorflow': False
+            'debug_tensorflow': False,
+            'collect_histograms': True
           }
 
 # load the dataset
@@ -113,7 +114,10 @@ else:
 if ops['encoder'] == 'LSTM':
     T_pred = tf.transpose(TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'], ops), [1,0,2])
 else:
-    T_pred, T_summary_weights, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
+    if ops['collect_histograms']:
+        T_pred, T_summary_weights, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
+    else:
+        T_pred, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
 
     #T_pred, debugging_val = TCH.HPM(P_x, ops, params, P_batch_size)
     #T_pred = tf.transpose(T_pred, [1,0,2])
@@ -142,7 +146,6 @@ T_accuracy = tf.reduce_sum(tf.reduce_sum(tf.cast(T_correct_pred, tf.float32)))/t
 tf.summary.scalar('T_cost', T_cost)
 tf.summary.scalar('accuracy', T_accuracy)
 T_summary_op = tf.summary.merge_all()
-#import pdb; pdb.set_trace()
 
 # Initialize the variables
 init = tf.global_variables_initializer()
@@ -171,6 +174,8 @@ writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph())
 
 epoch = 0
 counter = 0
+summary, deb_var, summary_weights = None, None, None
+
 print "Format: Train, Test, Valid"
 while epoch < ops['epochs']:
     train_batch_indices = DH.get_minibatches_ids(len(train_set), ops['batch_size'], shuffle=True)
@@ -182,14 +187,27 @@ while epoch < ops['epochs']:
                                             batch_indeces = batch_indeces,
                                             max_length = ops['max_length'])
         # x_set: [batch_size, max_length, frame_size]
-        _, summary, deb_var, summary_weights = T_sess.run(
-                                                [T_optimizer, T_summary_op, debugging_stuff, T_summary_weights],
+
+        tensor_list_to_recover = None
+        if ops['collect_histograms']:
+            tensor_list_to_recover = [T_optimizer, T_summary_op, debugging_stuff, T_summary_weights]
+        else:
+            tensor_list_to_recover = [T_optimizer, T_summary_op, debugging_stuff]
+
+        recovered_variables = T_sess.run(
+                                                tensor_list_to_recover,
                                                 feed_dict={
                                                             P_x: x_set,
                                                             P_y: DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length']),
                                                             P_len: batch_maxlen,
                                                             P_mask: mask,
                                                             P_batch_size: batch_size})
+
+        if ops['collect_histograms']:
+            _, summary, deb_var, summary_weights = recovered_variables
+        else:
+            _, summary, deb_var = recovered_variables
+
         # Print parameters
 
         # for v in tf.global_variables():
