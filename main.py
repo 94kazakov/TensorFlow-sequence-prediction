@@ -3,7 +3,7 @@ import numpy as np
 import data_help as DH
 import tensor_classes_helpers as TCH
 from tensorflow.python import debug as tf_debug
-
+import os
 
 """
 STRUCTURE:
@@ -52,18 +52,23 @@ tensor_classes_helpers:
 
 # Model parameters
 logs_path = '/Users/denis/Documents/hawkes/logs/run1'
+# Empty path if nonempty:
+DH.empty_directory(logs_path)
+
+
+
 ops = {
-            'epochs': 200,
+            'epochs': 500,
             'frame_size': 3,
             'n_hidden': 50,
             'n_classes': 50,
-            'learning_rate': 0.001,
+            'learning_rate': 0.0005,
             'batch_size': 64,
-            'max_length': 300,
+            'max_length': 50,
             'encoder': 'HPM',
             'dataset': 'data/reddit/reddit',
             'overwrite': False,
-            'model_save_name': "HPM_april4",
+            'model_save_name': "HPM_reddit_yhat_switched_april16",
             'model_load_name': None,
             'debug_tensorflow': False
           }
@@ -91,9 +96,11 @@ P_batch_size = tf.placeholder("float", None)
 
 # Graph weights
 W = {'out': TCH.weights_init(n_input=ops['n_hidden'], 
-                                n_output=ops['n_classes'])}
+                                n_output=ops['n_classes'],
+                                name='W_out')}
 b = {'out': TCH.bias_init(
-                    ops['n_classes'])}
+                    ops['n_classes'],
+                    name='b_out')}
 
 # params init
 # predict using encoder
@@ -106,7 +113,7 @@ else:
 if ops['encoder'] == 'LSTM':
     T_pred = tf.transpose(TCH.RNN(P_x, W['out'], b['out'], P_len, ops['n_hidden'], ops), [1,0,2])
 else:
-    T_pred, debugging_stuff, T_summary_weights = TCH.HPM(P_x, ops, params, P_batch_size)
+    T_pred, T_summary_weights, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
 
     #T_pred, debugging_val = TCH.HPM(P_x, ops, params, P_batch_size)
     #T_pred = tf.transpose(T_pred, [1,0,2])
@@ -114,16 +121,16 @@ else:
 # for y = [None, n_classes]:
 # cross_entropy = tf.reduce_mean(-tf.reduce_sum(y_ * tf.log(y), reduction_indices=[1]))
 
-# mean (batch_size):
+# (mean (batch_size):
 #   reduce_sum(n_steps):
 #       P_mask * (-reduce_sum(classes)):
-#           truth * predicted_distribution
-T_cost = tf.reduce_mean(
+#           truth * predicted_distribution)
+T_cost = tf.reduce_sum(
             tf.reduce_sum(
                 - tf.reduce_sum(
                     (P_y * tf.log(T_pred)),
                 reduction_indices=[2]) * P_mask,
-            reduction_indices=[1]))
+            reduction_indices=[1])) / tf.reduce_sum(tf.reduce_sum(P_mask))
 
 T_optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(T_cost) 
 
@@ -144,6 +151,7 @@ init = tf.global_variables_initializer()
 
 
 
+
 if ops['debug_tensorflow']:
     T_sess = tf_debug.LocalCLIDebugWrapperSession(T_sess)
     T_sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
@@ -151,10 +159,13 @@ if ops['debug_tensorflow']:
 saver = tf.train.Saver()
 try:
     new_saver = tf.train.import_meta_graph('saved_models/' + ops['model_load_name'] + '.meta')
-    new_saver.restore(T_sess, tf.train.latest_checkpoint('saved_models/'))
+    new_saver.restore(T_sess, 'saved_models/' + ops['model_load_name'])
     print "Model Loaded from " + ops['model_load_name']
 except:
+    print "Failed to load the model: " + str(ops['model_load_name'])
     T_sess.run(init)
+
+
 
 writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph())
 
@@ -166,13 +177,11 @@ while epoch < ops['epochs']:
     epoch += 1
     for batch_indeces in train_batch_indices:
         counter += 1
-
         x_set, batch_y, batch_maxlen, batch_size, mask = DH.pick_batch(
                                             dataset = train_set,
                                             batch_indeces = batch_indeces,
                                             max_length = ops['max_length'])
         # x_set: [batch_size, max_length, frame_size]
-
         _, summary, deb_var, summary_weights = T_sess.run(
                                                 [T_optimizer, T_summary_op, debugging_stuff, T_summary_weights],
                                                 feed_dict={
@@ -181,7 +190,19 @@ while epoch < ops['epochs']:
                                                             P_len: batch_maxlen,
                                                             P_mask: mask,
                                                             P_batch_size: batch_size})
+        # Print parameters
+
+        # for v in tf.global_variables():
+        #     v_ = T_sess.run(v)
+        #     print v.name
+        #     print v_
+        #     print '\n'
         #import pdb; pdb.set_trace()
+        #T_sess.run(tf.Print(TCH.cut_up_x(x_set, ops)[0], [x_set[0], TCH.cut_up_x(x_set, ops)[0]]))
+        #extract_batch = lambda arr, batch_i, n_hid_i: np.transpose(np.array([arr[i][batch_i][n_hid_i] for i in range(arr.shape[0])]))
+        #print extract_batch(deb_var, 0, 0)
+        #print extract_batch(deb_var, 0, 1)
+        #print extract_batch(deb_var, 0, 2)
         #print pred
         # T_sess.run(
         #     [TCH._step],
@@ -198,6 +219,7 @@ while epoch < ops['epochs']:
 
         writer.add_summary(summary, counter)
         writer.add_summary(summary_weights, counter)
+    print "alphas:", T_sess.run(tf.Print(params['alpha'], [params['alpha']]))
     # Evaluating model at each epoch
     datasets = [train_set, test_set, valid_set]
     dataset_names = ['train', 'test', 'valid']

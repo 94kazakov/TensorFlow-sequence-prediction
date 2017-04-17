@@ -15,11 +15,29 @@ NOTES:
 4) tf.Print() - not sure how to use. It seems like it still needs to be evaluated with the session.
 5) how to get shape of dynamic dimension? - can't.
 6) start: tensorboard --logdir=run1:logs/run1/ --port 6006
+7) To make variable not learnable, have to specify either:
+    tf.Variable(my_weights, trainable=False)
+    OR
+    optimizer = tf.train.AdagradOptimzer(0.01)
+    first_train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                         "scope/prefix/for/first/vars")
+    first_train_op = optimizer.minimize(cost, var_list=first_train_vars)
+    second_train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                          "scope/prefix/for/second/vars")
+    second_train_op = optimizer.minimize(cost, var_list=second_train_vars)
+
+Issues:
 
 Tasks:
- - figure out NaN's issue
  - how to access variable by name?  (ex: I want to retrieve a named variable)
  - use scopes: https://github.com/llSourcell/tensorflow_demo/blob/master/board.py
+ - debug using fake dataset. Understand what it's learning.
+ - TODO: something really trivial. Like the sequence with trnsition matrix that's mostly diagonal.
+ - TODO: just predict next element, where the (c predicts A, A predicts A, B predicts C).
+    dt = 1 if follows the rule
+    dt = 10 if it doesn't follow rule.
+    (predictions would be weaker over time). if it's 10 then decay memory a lot.
+
 *Lab number: 1b11
 2) make "ensemble", individual examples
 3) new dataset (10% prev=curr, LSTM
@@ -47,21 +65,43 @@ def output_placeholder(max_length_seq=100,
                         number_of_classes], name=name)
     return y
 
-def weights_init(n_input, n_output, name=None, small=True):
+def weights_init(n_input, n_output, name=None, small=False, idendity=False, forced_zero=False):
     init_matrix = None
     if small:
         init_matrix = tf.random_normal([n_input, n_output], stddev=0.01)
     else:
         init_matrix = tf.random_normal([n_input, n_output])
-    W = tf.Variable(init_matrix, name=name)
+
+    if idendity:
+        init_matrix = tf.diag(tf.ones([n_input]))
+    elif forced_zero:
+        init_matrix = tf.diag(tf.zeros([n_input]))
+
+    trainable = True
+    if idendity or forced_zero:
+        trainable = False
+    learnable_print = lambda bool: "Learned" if bool else "Not Learned"
+    print name, learnable_print(trainable)
+
+    W = tf.Variable(init_matrix, name=name, trainable=trainable)
     return W
 
-def bias_init(n_output, name=None, small=True):
-    b = None
+def bias_init(n_output, name=None, small=False, forced_zero=False):
     if small: #bias is negative so that initially, bias is pulling tthe sigmoid towards 0, not 1/2.
-        b = tf.Variable(tf.random_normal([n_output], mean=-2.0, stddev = 0.01), name=name)
+        b = tf.random_normal([n_output], mean=-4.0, stddev = 0.01)
     else:
-        b = tf.Variable(tf.random_normal([n_output]), name=name)
+        b = tf.random_normal([n_output])
+
+    if forced_zero:
+        b = tf.stop_gradient(tf.zeros([n_output]))
+
+    trainable = True
+    if  forced_zero:
+        trainable = False
+    learnable_print = lambda bool: "Learned" if bool else "Not Learned"
+    print name, learnable_print(trainable)
+
+    b = tf.Variable(b, trainable=trainable, name=name)
     return b
 
 def softmax_init(shape):
@@ -84,7 +124,8 @@ def cut_up_x(x_set, ops):
     # one hot embedding of x (previous state)
     x = tf.cast(x, tf.int32) # needs integers for one hot embedding to work
     # depth=n_classes, by default 1 for active, 0 inactive, appended as last dimension
-    x_vectorized = tf.one_hot(x, ops['n_classes'], name='x_vectorized')
+    #TODO: one hot (what is -1 is passed. is it just ignored)
+    x_vectorized = tf.one_hot(x - 1, ops['n_classes'], name='x_vectorized')
     # x_vectorized: [max_length, batch_size, n_classes]
     return x_vectorized, xt, yt
 
@@ -147,6 +188,34 @@ def RNN(x_set, T_W, T_b, T_seq_length, n_hidden, ops):
 def HPM_params_init(ops):
     # W_in: range of each element is from 0 to 1, since each weight is a "probability" for each hidden unit.
     # W_recurrent:
+    #ALERNATE
+    # W = {'in': weights_init(n_input=ops['n_classes'],
+    #                         n_output=ops['n_hidden'],
+    #                         name='W_in',
+    #                         idendity=True),
+    #      'recurrent': weights_init(n_input=ops['n_hidden'],
+    #                                n_output=ops['n_hidden'],
+    #                                name='W_recurrent',
+    #                                small=True,
+    #                                forced_zero=True),
+    #      'out':  weights_init(n_input=ops['n_hidden'],
+    #                                n_output=ops['n_classes'],
+    #                                name='W_out',
+    #                                idendity=True)
+    #      }
+    #
+    # b = {
+    #      'recurrent': bias_init(n_output=ops['n_hidden'],
+    #                      name='b_recurrent',
+    #                      small=True,
+    #                      forced_zero=True),
+    #      'out': bias_init(n_output=ops['n_classes'],
+    #                      name='b_out',
+    #                      small=False,
+    #                      forced_zero=True)
+    #     }
+
+    #OR
     W = {'in': weights_init(n_input=ops['n_classes'],
                             n_output=ops['n_hidden'],
                             name='W_in'),
@@ -154,33 +223,42 @@ def HPM_params_init(ops):
                                    n_output=ops['n_hidden'],
                                    name='W_recurrent',
                                    small=True),
-         'out':  weights_init(n_input=ops['n_hidden'],
-                                   n_output=ops['n_classes'],
-                                   name='W_out')
+         'out': weights_init(n_input=ops['n_hidden'],
+                             n_output=ops['n_classes'],
+                             name='W_out')
          }
 
-    b = {'in': bias_init(n_output=ops['n_hidden'],
-                         name='b_in',
-                         small=False),
-         'recurrent': bias_init(n_output=ops['n_hidden'],
-                         name='b_recurrent',
-                         small=True),
-         'out': bias_init(n_output=ops['n_classes'],
-                         name='b_out',
-                         small=False)
-        }
+    b = {
+        'recurrent': bias_init(n_output=ops['n_hidden'],
+                               name='b_recurrent',
+                               small=True),
+        'out': bias_init(n_output=ops['n_classes'],
+                         name='b_out')
+    }
 
-    timescales = 2.0 ** np.arange(-7,7)#(-7,7) vs (0, 1)
+    # ALTERNATE
+    timescales = 2.0 ** np.arange(-7,7)#0,12)#(-7,7) vs (0, 1)
+    #timescales = 2.0 ** np.array([1,2,3,4,5,6,7,8,9,10,11])
     n_timescales = len(timescales)
+    gamma = 1.0 / timescales
 
     # tensorflow automacally extends dimension of vector to the rest of dimensions
     # as long the last dimensions agree [x,x,a] + [a] = [x+a, x+a, a+a]
 
-    mu = tf.random_uniform([n_timescales], minval=1e-4, maxval=1e-3, dtype=tf.float32, name='mu')
-    gamma = 1.0 / timescales
-    alpha = tf.random_uniform([n_timescales], minval=1e-1, maxval=1.0, dtype=tf.float32, name='alpha')
-    c = tf.random_normal([n_timescales], mean=1.0/n_timescales, stddev = 0.05)
+    # TODO: REMOVE
+    # mu = tf.Variable(
+    #         tf.random_uniform([n_timescales], minval=1e-4, maxval=1e-3, dtype=tf.float32),
+    #         name='mu')
+    mu = tf.fill([n_timescales], 0.020202707317519466)
 
+
+    # alpha is just initialized to a const value
+    alpha = tf.Variable( #TODO: REMOVE
+                tf.random_uniform([n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
+                #[0.5, 0.5, 0.5],
+                name='alpha')
+    #c = tf.random_normal([n_timescales], mean=1.0/n_timescales, stddev = 0.05)
+    c = tf.fill([n_timescales], 1.0/n_timescales)
 
     params = {
         'W': W,
@@ -212,9 +290,9 @@ def HPM(x_set, ops, params, batch_size):
     n_timescales = params['n_timescales']
     mu = params['mu']
     c_init = params['c']
-    c_init = c_init/tf.reduce_sum(c_init)# initialize all timescales equally likely
+    #c_init = c_init/tf.reduce_sum(c_init)# initialize all timescales equally likely
     gamma = params['gamma']
-    alpha = params['alpha']
+    alpha = params['alpha'] * gamma # TODO: REMOVE? does scaling it here affect the z's later? since automatically they get lower activation
     batch_size = tf.cast(batch_size, tf.int32) #cast placeholder into integer
 
 
@@ -224,7 +302,8 @@ def HPM(x_set, ops, params, batch_size):
         #print vals
         return False
 
-    def _C(prior_of_event, likelyhood):
+    def _C(likelyhood, prior_of_event):
+        # timescale posterior
         # formula 3 - reweight the ensemble
         # likelihood, prior, posterior have dimensions:
         #       [batch_size, n_hid, n_timescales]
@@ -238,34 +317,46 @@ def HPM(x_set, ops, params, batch_size):
         return timescale_posterior
 
     def _Z(h_prev, delta_t):
+        # Probability of no event occuring at h_prev intensity till delta_t (integral over intensity)
         # delta_t: batch_size x n_timescales
         # h_prev: batch_size x n_hid x n_timescales
-        # Probability of no event occuring at h_prev intensity till delta_t
         # time passes
         # formula 1
+
+        #import pdb; pdb.set_trace()
         h_prev_tr = tf.transpose(h_prev, [1,0,2])
-        result = tf.exp((-(h_prev_tr - mu)*(1.0 - tf.exp(-gamma * delta_t)))/gamma -  mu*delta_t)
+        result = tf.exp(
+                        -(h_prev_tr - mu)*
+                        (1.0 - tf.exp(-gamma * delta_t))/gamma -
+                        mu*delta_t)
+
+        # gamma_exp = tf.exp(-gamma * delta_t)  # 1 x timescales x 1
+        # gamma_factor = (1.0 - gamma_exp) / gamma  # 1 x timescales x 1
+        # h_prev_tr = tf.transpose(h_prev, [1, 0, 2])
+        # result = tf.exp(-(h_prev_tr * gamma_factor + mu * delta_t))
         # rotate back [n_hid, batch, n_time] -> [batch, n_hid, n_time]
         return tf.transpose(result, [1,0,2], name='Z')
 
     def _H(h_prev, delta_t):
         # decay current intensity
-
+        # TODO: adopt into _Z, to avoid recomputing
         h_prev_tr = tf.transpose(h_prev, [1,0,2]) #[bath_size, n_hid, n_timescales] -> [n_hid, batch_size, n_timescales}
         # gamma * delta_t: [batch_size, n_timescales]
         result = mu + tf.exp(-gamma * delta_t) * (h_prev_tr - mu)
         return tf.transpose(result, [1,0,2], name='H')
 
     def _y_hat(z, c):
+        # Marginalize timescale
         # (batch_size, n_hidden, n_timescales)
         # output: (batch_size, n_hidden)
         # c - timescale probability
         # z - quantity
+
         return tf.reduce_sum(z * c, reduction_indices = [2], name='yhat')
 
     def _step(accumulated_vars, input_vars):
 
-        h_, c_, _, _ = accumulated_vars
+        h_, c_, _, _, _ = accumulated_vars
         x, xt, yt = input_vars
         # : mask: (batch_size, n_classes
         # : x - vectorized x: (batch_size, n_classes)
@@ -277,37 +368,42 @@ def HPM(x_set, ops, params, batch_size):
         h = _H(h_, xt)
         z = _Z(h_, xt) #(batch_size, n_hidden, n_timescales)
         # input part:
-        # TODO: activation function choice experiment
 
 
         # recurrent part: since y_hat is for t+1, we wait until here to calculate it rather
         #                   rather than in previous iteration
-        y_hat = _y_hat(z, c_) # :(batch_size, n_hidden)
 
+        y_hat = _y_hat(z, c_) # :(batch_size, n_hidden)
+        # ALTERNATE
         event = tf.sigmoid(
                         tf.matmul(x, W['in']) +  #:[batch_size, n_classes]*[n_classes, n_hid]
                         tf.matmul(y_hat, W['recurrent']) + b['recurrent'])  #:(batch_size, n_hid)*(n_hid, n_hid)
+        #OR
+        #event = tf.matmul(x, W['in'])
 
-        event = tf.clip_by_value(event, 0, 1) # TODO: how does Mike avoid this?
         # 2) update c
         event = tf.expand_dims(event, 2) # make [batch_size, n_hid] into [batch_size, n_hid, 1]
         # to support multiplication by [batch_size, n_hid, n_timescales]
-        # TODO: check Mike's code on c's update
+        # TODO: check Mike's code on c's update. Supposedely, just a tad bit more efficient
         c = event * _C(z*h, c_) + (1.0 - event) * _C(z, c_) # h^0 = 1
+        # c = _C(z, c_)
+        # c = event * _C(h, c) + (1.0 - event) * c
 
         # 3) update intensity
         h += alpha * event
 
         # 4) apply mask & predict next event
+        # TODO: does not using mask here, mess it up?
         z_hat = _Z(h, yt)
         h_hat = _H(h, yt)
 
-        y_predict = _y_hat(z_hat, c)
-        return [h, c, y_predict, c]
+        y_predict = _y_hat(1 - z_hat, c)
+        return [h, c, y_predict, event, z_hat]
 
 
 
     x, xt, yt = cut_up_x(x_set, ops)
+    print x
 
     # collect all the variables of interest
     #TODO: make this an option. this wastes a lot of time during computation
@@ -318,7 +414,7 @@ def HPM(x_set, ops, params, batch_size):
     tf.summary.histogram('b_out', b['out'], ['b'])
     tf.summary.histogram('c_init', c_init, ['init'])
     tf.summary.histogram('mu_init', mu, ['init'])
-    tf.summary.histogram('alpha_init', alpha, ['init'])
+    tf.summary.histogram('alpha_init', params['alpha'], ['init'])
     T_summary_weights = tf.summary.merge([
                             tf.summary.merge_all('W'),
                             tf.summary.merge_all('b'),
@@ -332,7 +428,8 @@ def HPM(x_set, ops, params, batch_size):
                         tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32) + mu, #h
                         tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32) + c_init, #c
                         tf.zeros([batch_size, ops['n_hidden']], tf.float32), # yhat
-                        tf.zeros([batch_size, ops['n_hidden'], n_timescales]) #debugging placeholder
+                        tf.zeros([batch_size, ops['n_hidden'], 1]), #debugging placeholder
+                        tf.zeros([batch_size, ops['n_hidden'], n_timescales])
 
                     ]
                    , name='hpm/scan')
@@ -344,7 +441,8 @@ def HPM(x_set, ops, params, batch_size):
 
     #tf.summary.histogram('y_hat', rval[2])
     hidden_prediction = tf.transpose(rval[2], [1, 0, 2]) # -> [batch_size, n_steps, n_classes]
+    # TODO: REMOVE
     output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
-
+    #output_projection = lambda x: tf.clip_by_value(tf.matmul(x, W['out']) + b['out'], 1e-8, 1.0)
     # TODO: make return a dict that's then assigned depending on what options are chosen?
-    return tf.map_fn(output_projection, hidden_prediction), rval[3], T_summary_weights
+    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4], tf.transpose(tf.map_fn(output_projection, hidden_prediction), [1,0,2])]

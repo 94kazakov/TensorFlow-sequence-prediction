@@ -226,5 +226,17 @@ def write_history(entry, filename, epoch, overwrite):
 
     with open(filename, "a") as myfile:
         myfile.write(str(entry).strip('[').strip(']') + '\n')
-    
+
+def empty_directory(path):
+    files = os.listdir(path)
+    if files == []:
+        print None
+    else:
+        for file in files:
+            try:
+                print "deleted:", file
+                os.remove(file)
+            except OSError:
+                pass
+        print "Emptied direcotry: " + path
 
