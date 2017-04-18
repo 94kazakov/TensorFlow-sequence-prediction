@@ -64,14 +64,14 @@ ops = {
             'n_classes': 50,
             'learning_rate': 0.0005,
             'batch_size': 64,
-            'max_length': 50,
+            'max_length': 200,
             'encoder': 'HPM',
-            'dataset': 'data/reddit_small_test/reddit',
+            'dataset': 'data/reddit/reddit',
             'overwrite': False,
-            'model_save_name': "HPM_reddit_yhat_switched_april16",
+            'model_save_name': "HPM_mu_alpha_scaled_april18",
             'model_load_name': None,
             'debug_tensorflow': False,
-            'collect_histograms': True
+            'collect_histograms': False
           }
 
 # load the dataset
@@ -190,9 +190,9 @@ while epoch < ops['epochs']:
 
         tensor_list_to_recover = None
         if ops['collect_histograms']:
-            tensor_list_to_recover = [T_optimizer, T_summary_op, debugging_stuff, T_summary_weights]
+            tensor_list_to_recover = [T_optimizer, debugging_stuff, T_summary_weights]
         else:
-            tensor_list_to_recover = [T_optimizer, T_summary_op, debugging_stuff]
+            tensor_list_to_recover = [T_optimizer, debugging_stuff]
 
         recovered_variables = T_sess.run(
                                                 tensor_list_to_recover,
@@ -204,9 +204,9 @@ while epoch < ops['epochs']:
                                                             P_batch_size: batch_size})
 
         if ops['collect_histograms']:
-            _, summary, deb_var, summary_weights = recovered_variables
+            _, deb_var, summary_weights = recovered_variables
         else:
-            _, summary, deb_var = recovered_variables
+            _, deb_var = recovered_variables
 
         # Print parameters
 
@@ -235,9 +235,9 @@ while epoch < ops['epochs']:
         #         P_mask: [[1, 1, 1, 1, 1, 1, 1, 1, 1]],
         #         P_batch_size: 1})
 
-        writer.add_summary(summary, counter)
-        writer.add_summary(summary_weights, counter)
-    print "alphas:", T_sess.run(tf.Print(params['alpha'], [params['alpha']]))
+        if ops['collect_histograms']:
+            writer.add_summary(summary_weights, counter)
+    # print "alphas:", T_sess.run(tf.Print(params['alpha'], [params['alpha']]))
     # Evaluating model at each epoch
     datasets = [train_set, test_set, valid_set]
     dataset_names = ['train', 'test', 'valid']

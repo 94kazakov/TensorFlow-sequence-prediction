@@ -249,7 +249,7 @@ def HPM_params_init(ops):
     # mu = tf.Variable(
     #         tf.random_uniform([n_timescales], minval=1e-4, maxval=1e-3, dtype=tf.float32),
     #         name='mu')
-    mu = tf.fill([n_timescales], 0.020202707317519466)
+    mu = tf.Variable(tf.fill([n_timescales], 0.020202707317519466), dtype=tf.float32, name='mu', trainable=True)
 
 
     # alpha is just initialized to a const value
@@ -284,16 +284,28 @@ def HPM(x_set, ops, params, batch_size):
     # convert x from [batch_size, max_length, frame_size] to
     #               [max_length, batch_size, frame_size]
     # and step over each time_step with _step function
+    batch_size = tf.cast(batch_size, tf.int32)  # cast placeholder into integer
+
     W = params['W']
     b = params['b']
     timescales = params['timescales']
     n_timescales = params['n_timescales']
-    mu = params['mu']
-    c_init = params['c']
+    mu = tf.nn.softplus(params['mu'])
+
     #c_init = c_init/tf.reduce_sum(c_init)# initialize all timescales equally likely
     gamma = params['gamma']
-    alpha = params['alpha'] * gamma # TODO: REMOVE? does scaling it here affect the z's later? since automatically they get lower activation
-    batch_size = tf.cast(batch_size, tf.int32) #cast placeholder into integer
+    # Scale important params by gamma
+    mu *= gamma ** np.log(np.exp(1.0) - 1.0) # TODO: what's the np.exp shenanigans? this is really crucial. look at Z's plots. I felt like it was flipped though
+                                             # TODO: I feel like this is easier to replace with just a max function over mu, no? - TEST later
+    alpha = tf.nn.softplus(params['alpha']) * gamma
+
+    c_init = params['c'] #TODO: figure out details. I feel like longer timescales are what needs to be biased, not in reverse. Test again!
+    # priorexp = gamma ** 10.0 ** (-5.0 * np.random.rand(ops['n_hidden']))
+    # c_init = tf.zeros([batch_size, ops['n_hidden'], n_timescales], priorexp, tf.float32)
+    # c_init = c_init/tf.reduce_sum(c_init, axis=2)
+
+
+
 
 
 
@@ -397,7 +409,7 @@ def HPM(x_set, ops, params, batch_size):
         z_hat = _Z(h, yt)
         h_hat = _H(h, yt)
 
-        y_predict = _y_hat(1 - z_hat, c)
+        y_predict = _y_hat(1 - z_hat, c) #TODO I imagine this can be learned, but why we do even need to flip this
         return [h, c, y_predict, event, z_hat]
 
 
@@ -446,7 +458,8 @@ def HPM(x_set, ops, params, batch_size):
     output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
     #output_projection = lambda x: tf.clip_by_value(tf.matmul(x, W['out']) + b['out'], 1e-8, 1.0)
     # TODO: is there a way to make this shorter?this is going to be if statements everywhere.
+    # yes - just make arrays empty (or like tf.zeros if anything. but preserve the structure of code that way
     if ops['collect_histograms']:
-        return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4], tf.transpose(tf.map_fn(output_projection, hidden_prediction), [1,0,2])]
+        return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4]]
     else:
-        return tf.map_fn(output_projection, hidden_prediction), [rval[0], rval[1], rval[2], rval[3], rval[4], tf.transpose(tf.map_fn(output_projection, hidden_prediction), [1,0,2])]
+        return tf.map_fn(output_projection, hidden_prediction), [rval[0], rval[1], rval[2], rval[3], rval[4]]
