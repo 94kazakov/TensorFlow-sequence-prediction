@@ -212,6 +212,7 @@ def length(sequence):
     length = tf.cast(length, tf.int32)
     return length
 
+
 def write_history(entry, filename, epoch, overwrite):
     # check if file exists and remove if it does
     # make a new file on the first epoch

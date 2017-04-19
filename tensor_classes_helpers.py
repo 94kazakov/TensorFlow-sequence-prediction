@@ -6,7 +6,10 @@ import numpy as np
 NOTES:
 1) when tensor([a,b,c])*tensor([b,c]) = tensor([a,b,c])
         tensor([a,b])*tensor([b]) = tensor([a,b])
+        OR
         tensor([a,1])*tensor([b]) = tensor([a,b]) - equivalent
+        OR
+        tensor([b])*tensor([a,1]) = tensor([a,b])
 2) dynamics shape vs static:
         tf.shape(my_tensor)[0] - dynamics (as graph computes) ex: batch_size=current_batch_size
         my_tensor.get_shape() - static (graph's 'locked in' value) ex: batch_size=?
@@ -25,24 +28,15 @@ NOTES:
     second_train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
                                           "scope/prefix/for/second/vars")
     second_train_op = optimizer.minimize(cost, var_list=second_train_vars)
+8) When our variable names/dimensions are not exactly like they were in the saved model, it won't work.
 
 Issues:
 
 Tasks:
  - how to access variable by name?  (ex: I want to retrieve a named variable)
  - use scopes: https://github.com/llSourcell/tensorflow_demo/blob/master/board.py
- - debug using fake dataset. Understand what it's learning.
- - TODO: something really trivial. Like the sequence with trnsition matrix that's mostly diagonal.
- - TODO: just predict next element, where the (c predicts A, A predicts A, B predicts C).
-    dt = 1 if follows the rule
-    dt = 10 if it doesn't follow rule.
-    (predictions would be weaker over time). if it's 10 then decay memory a lot.
 
 *Lab number: 1b11
-2) make "ensemble", individual examples
-3) new dataset (10% prev=curr, LSTM
-4) symmetric (+ & -) activations (to make learn faster) tanh > sigm
-5) embedding attempt
 """
 
 def get_tensor_by_name(name):
@@ -124,7 +118,6 @@ def cut_up_x(x_set, ops):
     # one hot embedding of x (previous state)
     x = tf.cast(x, tf.int32) # needs integers for one hot embedding to work
     # depth=n_classes, by default 1 for active, 0 inactive, appended as last dimension
-    #TODO: one hot (what is -1 is passed. is it just ignored)
     x_vectorized = tf.one_hot(x - 1, ops['n_classes'], name='x_vectorized')
     # x_vectorized: [max_length, batch_size, n_classes]
     return x_vectorized, xt, yt
@@ -160,11 +153,29 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  
         losses_entry.append(cost_batch/len(batch_indeces_arr))
     return accuracy_entry, losses_entry
     
+def LSTM_params_init(ops):
+    W = {'out': weights_init(n_input=ops['n_hidden'],
+                                 n_output=ops['n_classes'],
+                                 name='W_out')}
+    b = {'out': bias_init(
+        ops['n_classes'],
+        name='b_out')}
 
-def RNN(x_set, T_W, T_b, T_seq_length, n_hidden, ops):
+    params = {
+        'W': W,
+        'b': b
+    }
+    return params
+
+
+def RNN(x_set, T_seq_length, ops, params):
+    W = params['W']
+    b = params['b']
+
+
     # lstm cell
     #lstm_cell = rnn_cell.BasicLSTMCell(n_hidden, forget_bias=1.0)
-    lstm_cell = tf.contrib.rnn.BasicLSTMCell(n_hidden, forget_bias=1.0)
+    lstm_cell = tf.contrib.rnn.BasicLSTMCell(ops['n_hidden'], forget_bias=1.0)
     # get lstm_cell's output
     # dynamic_rnn return by default: 
     #   outputs: [max_time, batch_size, cell.output_size]
@@ -180,7 +191,7 @@ def RNN(x_set, T_W, T_b, T_seq_length, n_hidden, ops):
     
     # linear activation, using rnn innter loop last output
     # project into class space: x-[max_time, hidden_units], T_W-[hidden_units, n_classes]
-    output_projection = lambda x: tf.nn.softmax(tf.matmul(x, T_W) + T_b)
+    output_projection = lambda x: tf.nn.softmax(tf.matmul(x, W['out']) + b['out'])
 
     return tf.map_fn(output_projection, outputs)
 
@@ -241,24 +252,25 @@ def HPM_params_init(ops):
     #timescales = 2.0 ** np.array([1,2,3,4,5,6,7,8,9,10,11])
     n_timescales = len(timescales)
     gamma = 1.0 / timescales
+    c = tf.fill([n_timescales], 1.0 / n_timescales)
 
-    # tensorflow automacally extends dimension of vector to the rest of dimensions
-    # as long the last dimensions agree [x,x,a] + [a] = [x+a, x+a, a+a]
+    if ops['unique_mus_alphas']:
+        mu = tf.Variable(-tf.log(
+                            tf.fill([ops['n_hidden'], n_timescales], 1e-3)),
+                         name='mu', trainable=True, dtype=tf.float32)
+        alpha = tf.Variable(
+                    tf.random_uniform([ops['n_hidden'], n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
+                    name='alpha')
+    else:
+        # TODO: Understand why and how it works. so by putting  a log there, we are skewing the gradient?
+        mu = tf.Variable(-tf.log(
+                            tf.fill([n_timescales], 1e-3)),
+                         name='mu', trainable=True, dtype=tf.float32)
+        # alpha is just initialized to a const value
+        alpha = tf.Variable(
+                    tf.random_uniform([n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
+                    name='alpha')
 
-    # TODO: REMOVE
-    # mu = tf.Variable(
-    #         tf.random_uniform([n_timescales], minval=1e-4, maxval=1e-3, dtype=tf.float32),
-    #         name='mu')
-    mu = tf.Variable(tf.fill([n_timescales], 0.020202707317519466), dtype=tf.float32, name='mu', trainable=True)
-
-
-    # alpha is just initialized to a const value
-    alpha = tf.Variable( #TODO: REMOVE
-                tf.random_uniform([n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
-                #[0.5, 0.5, 0.5],
-                name='alpha')
-    #c = tf.random_normal([n_timescales], mean=1.0/n_timescales, stddev = 0.05)
-    c = tf.fill([n_timescales], 1.0/n_timescales)
 
     params = {
         'W': W,
@@ -288,31 +300,18 @@ def HPM(x_set, ops, params, batch_size):
 
     W = params['W']
     b = params['b']
-    timescales = params['timescales']
     n_timescales = params['n_timescales']
-    mu = tf.nn.softplus(params['mu'])
 
-    #c_init = c_init/tf.reduce_sum(c_init)# initialize all timescales equally likely
     gamma = params['gamma']
     # Scale important params by gamma
-    mu *= gamma ** np.log(np.exp(1.0) - 1.0) # TODO: what's the np.exp shenanigans? this is really crucial. look at Z's plots. I felt like it was flipped though
-                                             # TODO: I feel like this is easier to replace with just a max function over mu, no? - TEST later
-    alpha = tf.nn.softplus(params['alpha']) * gamma
+    alpha_init = params['alpha']
+    mu_init = params['mu']
+    # exp(--log(x) = x
+    mu = tf.exp(-mu_init)
+    alpha = tf.nn.softplus(alpha_init) * gamma
 
-    c_init = params['c'] #TODO: figure out details. I feel like longer timescales are what needs to be biased, not in reverse. Test again!
-    # priorexp = gamma ** 10.0 ** (-5.0 * np.random.rand(ops['n_hidden']))
-    # c_init = tf.zeros([batch_size, ops['n_hidden'], n_timescales], priorexp, tf.float32)
-    # c_init = c_init/tf.reduce_sum(c_init, axis=2)
+    c_init = params['c']
 
-
-
-
-
-
-    def _debugging_function(vals):
-        #print "Inside debugging f-n:"
-        #print vals
-        return False
 
     def _C(likelyhood, prior_of_event):
         # timescale posterior
@@ -335,27 +334,25 @@ def HPM(x_set, ops, params, batch_size):
         # time passes
         # formula 1
 
-        #import pdb; pdb.set_trace()
-        h_prev_tr = tf.transpose(h_prev, [1,0,2])
-        result = tf.exp(
-                        -(h_prev_tr - mu)*
-                        (1.0 - tf.exp(-gamma * delta_t))/gamma -
-                        mu*delta_t)
+        h_prev -= mu
+        delta_t = tf.expand_dims(delta_t, 2)  # [batch_size, 1] -> [batch_size, 1, 1]
 
-        # gamma_exp = tf.exp(-gamma * delta_t)  # 1 x timescales x 1
-        # gamma_factor = (1.0 - gamma_exp) / gamma  # 1 x timescales x 1
-        # h_prev_tr = tf.transpose(h_prev, [1, 0, 2])
-        # result = tf.exp(-(h_prev_tr * gamma_factor + mu * delta_t))
-        # rotate back [n_hid, batch, n_time] -> [batch, n_hid, n_time]
-        return tf.transpose(result, [1,0,2], name='Z')
+        _gamma = gamma #local copy since we can't modify global copy
+        if ops['unique_mus_alphas']:
+            _gamma = tf.zeros([ops['n_hidden'], n_timescales], tf.float32) + gamma #[n_timescale]->[n_hid, n_timescale}
+
+        h_times_gamma_factor = h_prev * (1.0 - tf.exp(-_gamma * delta_t)) / gamma
+        result = tf.exp(-(h_times_gamma_factor + mu*delta_t), name='Z')
+        return result
 
     def _H(h_prev, delta_t):
         # decay current intensity
         # TODO: adopt into _Z, to avoid recomputing
+        h_prev -= mu
         h_prev_tr = tf.transpose(h_prev, [1,0,2]) #[bath_size, n_hid, n_timescales] -> [n_hid, batch_size, n_timescales}
         # gamma * delta_t: [batch_size, n_timescales]
-        result = mu + tf.exp(-gamma * delta_t) * (h_prev_tr - mu)
-        return tf.transpose(result, [1,0,2], name='H')
+        result = tf.exp(-gamma * delta_t) * h_prev_tr
+        return tf.transpose(result, [1,0,2], name='H') + mu
 
     def _y_hat(z, c):
         # Marginalize timescale
@@ -363,11 +360,9 @@ def HPM(x_set, ops, params, batch_size):
         # output: (batch_size, n_hidden)
         # c - timescale probability
         # z - quantity
-
         return tf.reduce_sum(z * c, reduction_indices = [2], name='yhat')
 
     def _step(accumulated_vars, input_vars):
-
         h_, c_, _, _, _ = accumulated_vars
         x, xt, yt = input_vars
         # : mask: (batch_size, n_classes
@@ -390,11 +385,10 @@ def HPM(x_set, ops, params, batch_size):
         event = tf.sigmoid(
                         tf.matmul(x, W['in']) +  #:[batch_size, n_classes]*[n_classes, n_hid]
                         tf.matmul(y_hat, W['recurrent']) + b['recurrent'])  #:(batch_size, n_hid)*(n_hid, n_hid)
-        #OR
+        #OR TODO: make a flag for this running config
         #event = tf.matmul(x, W['in'])
-
         # 2) update c
-        event = tf.expand_dims(event, 2) # make [batch_size, n_hid] into [batch_size, n_hid, 1]
+        event = tf.expand_dims(event, 2) # [batch_size, n_hid] -> [batch_size, n_hid, 1]
         # to support multiplication by [batch_size, n_hid, n_timescales]
         # TODO: check Mike's code on c's update. Supposedely, just a tad bit more efficient
         c = event * _C(z*h, c_) + (1.0 - event) * _C(z, c_) # h^0 = 1
@@ -402,14 +396,14 @@ def HPM(x_set, ops, params, batch_size):
         # c = event * _C(h, c) + (1.0 - event) * c
 
         # 3) update intensity
+        # - here alpha can either be a vector [n_timescales] or a matrix [n_hid, n_timescales]
         h += alpha * event
 
         # 4) apply mask & predict next event
-        # TODO: does not using mask here, mess it up?
         z_hat = _Z(h, yt)
-        h_hat = _H(h, yt)
 
-        y_predict = _y_hat(1 - z_hat, c) #TODO I imagine this can be learned, but why we do even need to flip this
+        y_predict = _y_hat(1 - z_hat, c)
+
         return [h, c, y_predict, event, z_hat]
 
 
@@ -418,7 +412,7 @@ def HPM(x_set, ops, params, batch_size):
     print x
 
     # collect all the variables of interest
-    T_summary_weights = None
+    T_summary_weights = tf.zeros([1],name='None_tensor')
     if ops['collect_histograms']:
         tf.summary.histogram('W_in', W['in'], ['W'])
         tf.summary.histogram('W_rec', W['recurrent'], ['W'])
@@ -432,7 +426,7 @@ def HPM(x_set, ops, params, batch_size):
                                 tf.summary.merge_all('W'),
                                 tf.summary.merge_all('b'),
                                 tf.summary.merge_all('init')
-                                ])
+                                ], name='T_summary_weights')
 
 
     rval = tf.scan(_step,
@@ -447,19 +441,7 @@ def HPM(x_set, ops, params, batch_size):
                     ]
                    , name='hpm/scan')
 
-    #debug_print_op = tf.py_func(_debugging_function, [[mu, alpha]], [tf.bool])
-    #return predictions
-    #rval[2]: [max_length, batch_size, n_hid] - at this point we have
-    # all the intensities [n_hid] telling us which event is most likely to fire.
-
-    #tf.summary.histogram('y_hat', rval[2])
     hidden_prediction = tf.transpose(rval[2], [1, 0, 2]) # -> [batch_size, n_steps, n_classes]
-    # TODO: REMOVE
     output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
-    #output_projection = lambda x: tf.clip_by_value(tf.matmul(x, W['out']) + b['out'], 1e-8, 1.0)
-    # TODO: is there a way to make this shorter?this is going to be if statements everywhere.
-    # yes - just make arrays empty (or like tf.zeros if anything. but preserve the structure of code that way
-    if ops['collect_histograms']:
-        return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4]]
-    else:
-        return tf.map_fn(output_projection, hidden_prediction), [rval[0], rval[1], rval[2], rval[3], rval[4]]
+
+    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4]]
