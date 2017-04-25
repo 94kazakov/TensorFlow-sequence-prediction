@@ -143,7 +143,8 @@ def prepare_data(ox, oxt, oy, oyt, maxlen=None, extended_len=0):
     maxlen = np.max(lengths)
 
 
-    # extend to maximal length, TODO: remove
+    # extend to maximal length, TODO: remove  -I don't think it's possible since tensors do have to fit placeholder always
+    # But! can just cut off them later, that's why the return of this batch_maxlength is still np.max(lengths)
     if extended_len != 0:
         maxlen = extended_len
 
@@ -180,7 +181,7 @@ def pick_batch(dataset, batch_indeces, max_length):
                                                                     batch_xt, 
                                                                     batch_y, 
                                                                     batch_yt, 
-                                                                    maxlen=max_length, 
+                                                                    maxlen=max_length,
                                                                     extended_len=max_length)
     # make an input set of dimensions (batch_size, max_length, frame_size)
     x_set = np.array([batch_x, batch_xt, batch_yt]).transpose([1,2,0])

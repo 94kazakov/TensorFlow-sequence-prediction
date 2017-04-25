@@ -57,11 +57,11 @@ ops = {
             'n_classes': 50,
             'learning_rate': 0.0005,
             'batch_size': 64,
-            'max_length': 50,
+            'max_length': 2000,
             'encoder': 'HPM',
             'dataset': 'data/reddit_test/reddit',
             'overwrite': False,
-            'model_save_name': "HPM_unique_mus_alphas_april18",
+            'model_save_name': "TEST",
             'model_load_name': None,
             'debug_tensorflow': False,
             'collect_histograms': False,
@@ -92,17 +92,17 @@ P_batch_size = tf.placeholder("float", None)
 
 
 # params init
-# predict using encoder
-if ops['encoder'] == 'LSTM':
-    params = TCH.LSTM_params_init(ops)
-else:
-    params = TCH.HPM_params_init(ops)
+if ops['encoder'] == "LSTM":
+    params_lstm = TCH.LSTM_params_init(ops)
+elif ops['encoder'] == "HPM":
+    params_hpm = TCH.HPM_params_init(ops)
 
 # predict using encoder
 if ops['encoder'] == 'LSTM':
-    T_pred = tf.transpose(TCH.RNN(P_x, P_len, ops, params), [1,0,2])
-else:
-    T_pred, T_summary_weights, debugging_stuff = TCH.HPM(P_x, ops, params, P_batch_size)
+    T_pred, T_summary_weights, debugging_stuff = TCH.RNN(P_x, P_len, ops, params_lstm)
+    T_pred = tf.transpose(T_pred, [1,0,2])
+elif ops['encoder'] == 'HPM':
+    T_pred, T_summary_weights, debugging_stuff = TCH.HPM(P_x, P_len, P_batch_size, ops, params_hpm, P_batch_size)
 
 
 # (mean (batch_size):

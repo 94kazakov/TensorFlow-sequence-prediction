@@ -29,13 +29,16 @@ NOTES:
                                           "scope/prefix/for/second/vars")
     second_train_op = optimizer.minimize(cost, var_list=second_train_vars)
 8) When our variable names/dimensions are not exactly like they were in the saved model, it won't work.
+9) to load 2 separate models:
+    self.saver_en-fr = Saver([v for v in tf.all_variables() if 'en_fr' in v.name])
 
 Issues:
 
 Tasks:
  - how to access variable by name?  (ex: I want to retrieve a named variable)
  - use scopes: https://github.com/llSourcell/tensorflow_demo/blob/master/board.py
-
+Resources:
+ https://blog.metaflow.fr/tensorflow-saving-restoring-and-mixing-multiple-models-c4c94d5d7125 - saving/restoring models
 *Lab number: 1b11
 """
 
@@ -102,7 +105,8 @@ def softmax_init(shape):
     # softmax initialization of size shape casted to tf.float32
     return tf.cast(tf.nn.softmax(tf.Variable(tf.random_normal(shape))), tf.float32)
 
-def cut_up_x(x_set, ops):
+# TODO: amake rray-like arguments for concise format
+def cut_up_x(x_set, ops, P_len=None, n_timescales=None, P_batch_size=None):
     # x_set: [batch_size, max_length, frame_size]
     x_set = tf.transpose(x_set, [1,0,2])
     x_set = tf.cast(x_set, tf.float32)
@@ -119,8 +123,18 @@ def cut_up_x(x_set, ops):
     x = tf.cast(x, tf.int32) # needs integers for one hot embedding to work
     # depth=n_classes, by default 1 for active, 0 inactive, appended as last dimension
     x_vectorized = tf.one_hot(x - 1, ops['n_classes'], name='x_vectorized')
-    # x_vectorized: [max_length, batch_size, n_classes]
-    return x_vectorized, xt, yt
+    # x_vectorized: [n_steps, batch_size, n_classes]
+    x_leftover = None
+    if P_len != None:
+        # TODO: essentially made the code undebuggable, since the shape is no longer "predictable" for TensorFlow.
+        # even if the slice is zero across n_steps (P_len==max_length, just make an empty tensor of correct shape)
+        x_leftover = tf.slice(x_vectorized, [P_len, 0, 0], [ops['max_length'] - P_len, -1, -1], name='x_vectorized_filler')
+        x_vectorized = tf.slice(x_vectorized, [0,0,0], [P_len, -1, -1], name='x_vectorized_data')
+
+        # cut the rest of tensors since they aren't used anywhere except in the network
+        xt = tf.slice(xt, [0,0,0], [P_len, -1, -1], name='xt')
+        yt = tf.slice(yt, [0,0,0], [P_len, -1, -1], name='yt')
+    return x_vectorized, xt, yt, x_leftover
 
 def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  T_cost, dataset_names, datasets, ops):
     # passes all needed tensor placeholders to fill with passed datasets
@@ -154,16 +168,20 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  
     return accuracy_entry, losses_entry
     
 def LSTM_params_init(ops):
-    W = {'out': weights_init(n_input=ops['n_hidden'],
-                                 n_output=ops['n_classes'],
-                                 name='W_out')}
-    b = {'out': bias_init(
-        ops['n_classes'],
-        name='b_out')}
+    with tf.variable_scope("LSTM"):
+        W = {'out': weights_init(n_input=ops['n_hidden'] + 2,
+                                     n_output=ops['n_classes'],
+                                     name='W_out')}
+        b = {'out': bias_init(
+            ops['n_classes'],
+            name='b_out')}
+
+        lstm_cell = tf.contrib.rnn.BasicLSTMCell(ops['n_hidden'] + 2, forget_bias=1.0)
 
     params = {
         'W': W,
-        'b': b
+        'b': b,
+        'lstm_cell': lstm_cell
     }
     return params
 
@@ -174,17 +192,17 @@ def RNN(x_set, T_seq_length, ops, params):
 
 
     # lstm cell
-    #lstm_cell = rnn_cell.BasicLSTMCell(n_hidden, forget_bias=1.0)
-    lstm_cell = tf.contrib.rnn.BasicLSTMCell(ops['n_hidden'], forget_bias=1.0)
+    lstm_cell = params['lstm_cell']
+
     # get lstm_cell's output
     # dynamic_rnn return by default: 
     #   outputs: [max_time, batch_size, cell.output_size]
-    x, xt, yt = cut_up_x(x_set, ops)
+    x, xt, yt, _ = cut_up_x(x_set, ops)
 
-    x = tf.concat([x, xt, yt], 2) #[max_time, batch_size, n_hid + 2]
+    x_concat = tf.concat([x, xt, yt], 2) #[max_time, batch_size, n_hid + 2]
     outputs, states = tf.nn.dynamic_rnn(
-                                lstm_cell, 
-                                x, 
+                                lstm_cell,
+                                x_concat,
                                 dtype=tf.float32,
                                 sequence_length=T_seq_length,
                                 time_major=True)
@@ -193,83 +211,87 @@ def RNN(x_set, T_seq_length, ops, params):
     # project into class space: x-[max_time, hidden_units], T_W-[hidden_units, n_classes]
     output_projection = lambda x: tf.nn.softmax(tf.matmul(x, W['out']) + b['out'])
 
-    return tf.map_fn(output_projection, outputs)
+    T_summary_weights = tf.zeros([1], name='None_tensor1')
+    debugging_stuff = states
+    return tf.map_fn(output_projection, outputs), T_summary_weights, debugging_stuff
 
 
 def HPM_params_init(ops):
-    # W_in: range of each element is from 0 to 1, since each weight is a "probability" for each hidden unit.
-    # W_recurrent:
-    #ALERNATE
-    # W = {'in': weights_init(n_input=ops['n_classes'],
-    #                         n_output=ops['n_hidden'],
-    #                         name='W_in',
-    #                         idendity=True),
-    #      'recurrent': weights_init(n_input=ops['n_hidden'],
-    #                                n_output=ops['n_hidden'],
-    #                                name='W_recurrent',
-    #                                small=True,
-    #                                forced_zero=True),
-    #      'out':  weights_init(n_input=ops['n_hidden'],
-    #                                n_output=ops['n_classes'],
-    #                                name='W_out',
-    #                                idendity=True)
-    #      }
-    #
-    # b = {
-    #      'recurrent': bias_init(n_output=ops['n_hidden'],
-    #                      name='b_recurrent',
-    #                      small=True,
-    #                      forced_zero=True),
-    #      'out': bias_init(n_output=ops['n_classes'],
-    #                      name='b_out',
-    #                      small=False,
-    #                      forced_zero=True)
-    #     }
+    with tf.variable_scope("HPM"):
+        # W_in: range of each element is from 0 to 1, since each weight is a "probability" for each hidden unit.
+        # W_recurrent:
+        #ALERNATE
+        # W = {'in': weights_init(n_input=ops['n_classes'],
+        #                         n_output=ops['n_hidden'],
+        #                         name='W_in',
+        #                         idendity=True),
+        #      'recurrent': weights_init(n_input=ops['n_hidden'],
+        #                                n_output=ops['n_hidden'],
+        #                                name='W_recurrent',
+        #                                small=True,
+        #                                forced_zero=True),
+        #      'out':  weights_init(n_input=ops['n_hidden'],
+        #                                n_output=ops['n_classes'],
+        #                                name='W_out',
+        #                                idendity=True)
+        #      }
+        #
+        # b = {
+        #      'recurrent': bias_init(n_output=ops['n_hidden'],
+        #                      name='b_recurrent',
+        #                      small=True,
+        #                      forced_zero=True),
+        #      'out': bias_init(n_output=ops['n_classes'],
+        #                      name='b_out',
+        #                      small=False,
+        #                      forced_zero=True)
+        #     }
 
-    #OR
-    W = {'in': weights_init(n_input=ops['n_classes'],
-                            n_output=ops['n_hidden'],
-                            name='W_in'),
-         'recurrent': weights_init(n_input=ops['n_hidden'],
-                                   n_output=ops['n_hidden'],
-                                   name='W_recurrent',
+        #OR
+        W = {'in': weights_init(n_input=ops['n_classes'],
+                                n_output=ops['n_hidden'],
+                                name='W_in'),
+             'recurrent': weights_init(n_input=ops['n_hidden'],
+                                       n_output=ops['n_hidden'],
+                                       name='W_recurrent',
+                                       small=True),
+             'out': weights_init(n_input=ops['n_hidden'],
+                                 n_output=ops['n_classes'],
+                                 name='W_out')
+             }
+
+        b = {
+            'recurrent': bias_init(n_output=ops['n_hidden'],
+                                   name='b_recurrent',
                                    small=True),
-         'out': weights_init(n_input=ops['n_hidden'],
-                             n_output=ops['n_classes'],
-                             name='W_out')
-         }
+            'out': bias_init(n_output=ops['n_classes'],
+                             name='b_out')
+        }
 
-    b = {
-        'recurrent': bias_init(n_output=ops['n_hidden'],
-                               name='b_recurrent',
-                               small=True),
-        'out': bias_init(n_output=ops['n_classes'],
-                         name='b_out')
-    }
+        # ALTERNATE
+        timescales = 2.0 ** np.arange(-7,7)#0,12)#(-7,7) vs (0, 1)
+        #timescales = 2.0 ** np.array([1,2,3,4,5,6,7,8,9,10,11])
+        n_timescales = len(timescales)
+        gamma = 1.0 / timescales
+        c = tf.fill([n_timescales], 1.0 / n_timescales)
 
-    # ALTERNATE
-    timescales = 2.0 ** np.arange(-7,7)#0,12)#(-7,7) vs (0, 1)
-    #timescales = 2.0 ** np.array([1,2,3,4,5,6,7,8,9,10,11])
-    n_timescales = len(timescales)
-    gamma = 1.0 / timescales
-    c = tf.fill([n_timescales], 1.0 / n_timescales)
-
-    if ops['unique_mus_alphas']:
-        mu = tf.Variable(-tf.log(
-                            tf.fill([ops['n_hidden'], n_timescales], 1e-3)),
-                         name='mu', trainable=True, dtype=tf.float32)
-        alpha = tf.Variable(
-                    tf.random_uniform([ops['n_hidden'], n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
-                    name='alpha')
-    else:
-        # TODO: Understand why and how it works. so by putting  a log there, we are skewing the gradient?
-        mu = tf.Variable(-tf.log(
-                            tf.fill([n_timescales], 1e-3)),
-                         name='mu', trainable=True, dtype=tf.float32)
-        # alpha is just initialized to a const value
-        alpha = tf.Variable(
-                    tf.random_uniform([n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
-                    name='alpha')
+        if ops['unique_mus_alphas']:
+            print "Alphas and Mus will be across all hidden unts"
+            mu = tf.Variable(-tf.log(
+                                tf.fill([ops['n_hidden'], n_timescales], 1e-3)),
+                             name='mu', trainable=True, dtype=tf.float32)
+            alpha = tf.Variable(
+                        tf.random_uniform([ops['n_hidden'], n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
+                        name='alpha')
+        else:
+            # TODO: Understand why and how it works. so by putting  a log there, we are skewing the gradient?
+            mu = tf.Variable(-tf.log(
+                                tf.fill([n_timescales], 1e-3)),
+                             name='mu', trainable=True, dtype=tf.float32)
+            # alpha is just initialized to a const value
+            alpha = tf.Variable(
+                        tf.random_uniform([n_timescales], minval=0.5, maxval=0.5001, dtype=tf.float32),
+                        name='alpha')
 
 
     params = {
@@ -291,7 +313,7 @@ def HPM_params_init(ops):
 # Have multiple timescales for each process that are ready to "kick-in".
 # For a certain event type in whichever time-scale works best => reinitialize c_
 # every new sequence. 
-def HPM(x_set, ops, params, batch_size):
+def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
     # init h, alphas, timescales, mu etc
     # convert x from [batch_size, max_length, frame_size] to
     #               [max_length, batch_size, frame_size]
@@ -336,7 +358,6 @@ def HPM(x_set, ops, params, batch_size):
 
         h_prev -= mu
         delta_t = tf.expand_dims(delta_t, 2)  # [batch_size, 1] -> [batch_size, 1, 1]
-
         _gamma = gamma #local copy since we can't modify global copy
         if ops['unique_mus_alphas']:
             _gamma = tf.zeros([ops['n_hidden'], n_timescales], tf.float32) + gamma #[n_timescale]->[n_hid, n_timescale}
@@ -407,10 +428,8 @@ def HPM(x_set, ops, params, batch_size):
         return [h, c, y_predict, event, z_hat]
 
 
-
-    x, xt, yt = cut_up_x(x_set, ops)
-    print x
-
+    x, xt, yt, x_leftover = cut_up_x(x_set, ops, P_len, n_timescales, P_batch_size)
+    print x, xt, yt
     # collect all the variables of interest
     T_summary_weights = tf.zeros([1],name='None_tensor')
     if ops['collect_histograms']:
@@ -441,7 +460,12 @@ def HPM(x_set, ops, params, batch_size):
                     ]
                    , name='hpm/scan')
 
-    hidden_prediction = tf.transpose(rval[2], [1, 0, 2]) # -> [batch_size, n_steps, n_classes]
+    hidden_prediction = tf.transpose(rval[2], [1, 0, 2]) # -> [batch_size, n_steps, n_hidden]
     output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
+    prediction_outputed = tf.map_fn(output_projection, hidden_prediction)
 
-    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4]]
+    # TODO: remove later by editing the part about the mask's dimension. For now, just fitting the old code
+    x_leftover = tf.transpose(x_leftover, [1,0,2]) + 1e-8# -> [batch_size, n_steps, n_classes]
+    prediction_outputed = tf.concat([prediction_outputed, x_leftover], 1)
+
+    return prediction_outputed, T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4], prediction_outputed]
