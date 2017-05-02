@@ -57,15 +57,16 @@ ops = {
             'n_classes': 50,
             'learning_rate': 0.0005,
             'batch_size': 64,
-            'max_length': 2000,
-            'encoder': 'HPM',
-            'dataset': 'data/reddit_test/reddit',
+            'max_length': 200,
+            'encoder': 'LSTM',
+            'dataset': 'data/reddit/reddit',
             'overwrite': False,
             'model_save_name': "TEST",
-            'model_load_name': None,
-            'debug_tensorflow': False,
+            'model_load_name': "TEST",
+            'store_graph': False,
             'collect_histograms': False,
-            'unique_mus_alphas': True
+            'unique_mus_alphas': True,
+            'embedding': True
           }
 
 # load the dataset
@@ -129,7 +130,7 @@ init = tf.global_variables_initializer()
 
 
 
-if ops['debug_tensorflow']:
+if ops['store_graph']:
     # Model parameters
     logs_path = '/Users/denis/Documents/hawkes/logs/run1'
     # Empty path if nonempty:

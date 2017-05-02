@@ -212,7 +212,7 @@ def RNN(x_set, T_seq_length, ops, params):
     output_projection = lambda x: tf.nn.softmax(tf.matmul(x, W['out']) + b['out'])
 
     T_summary_weights = tf.zeros([1], name='None_tensor1')
-    debugging_stuff = states
+    debugging_stuff = states # this is just so that states here correspond to y_hats in HPM
     return tf.map_fn(output_projection, outputs), T_summary_weights, debugging_stuff
 
 
@@ -385,9 +385,9 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
 
     def _step(accumulated_vars, input_vars):
         h_, c_, _, _, _ = accumulated_vars
-        x, xt, yt = input_vars
+        x_vec, xt, yt = input_vars
         # : mask: (batch_size, n_classes
-        # : x - vectorized x: (batch_size, n_classes)
+        # : x_vec - vectorized x: (batch_size, n_classes)
         # : xt, yt: (batch_size, 1)
         # : h_, c_ - from previous iteration: (batch_size, n_hidden, n_timescales)
 
@@ -404,7 +404,7 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
         y_hat = _y_hat(z, c_) # :(batch_size, n_hidden)
         # ALTERNATE
         event = tf.sigmoid(
-                        tf.matmul(x, W['in']) +  #:[batch_size, n_classes]*[n_classes, n_hid]
+                        x_vec +  #:[batch_size, n_classes]*[n_classes, n_hid]
                         tf.matmul(y_hat, W['recurrent']) + b['recurrent'])  #:(batch_size, n_hid)*(n_hid, n_hid)
         #OR TODO: make a flag for this running config
         #event = tf.matmul(x, W['in'])
@@ -429,6 +429,15 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
 
 
     x, xt, yt, x_leftover = cut_up_x(x_set, ops, P_len, n_timescales, P_batch_size)
+
+    #activate x:
+    if ops['embedding']:
+        activate = lambda x: W['emb'][x]
+    else:
+        activate = lambda x: tf.matmul(x, W['in'])
+        x_vec = tf.map_fn(activate, x)
+
+
     print x, xt, yt
     # collect all the variables of interest
     T_summary_weights = tf.zeros([1],name='None_tensor')
@@ -449,7 +458,7 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
 
 
     rval = tf.scan(_step,
-                    elems=[x, xt, yt],
+                    elems=[x_vec, xt, yt],
                     initializer=[
                         tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32) + mu, #h
                         tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32) + c_init, #c
