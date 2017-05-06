@@ -166,7 +166,11 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  
         accuracy_entry.append(acc_avg/len(batch_indeces_arr))
         losses_entry.append(cost_batch/len(batch_indeces_arr))
     return accuracy_entry, losses_entry
-    
+
+
+############################
+### LSTM OUT OF THE BOX ####
+############################
 def LSTM_params_init(ops):
     with tf.variable_scope("LSTM"):
         W = {'out': weights_init(n_input=ops['n_hidden'] + 2,
@@ -186,7 +190,8 @@ def LSTM_params_init(ops):
     return params
 
 
-def RNN(x_set, T_seq_length, ops, params):
+def RNN(placeholders, ops, params):
+    x_set, T_seq_length = placeholders
     W = params['W']
     b = params['b']
 
@@ -199,7 +204,7 @@ def RNN(x_set, T_seq_length, ops, params):
     #   outputs: [max_time, batch_size, cell.output_size]
     x, xt, yt, _ = cut_up_x(x_set, ops)
 
-    x_concat = tf.concat([x, xt, yt], 2) #[max_time, batch_size, n_hid + 2]
+    x_concat = tf.concat([x, xt, yt], 2) #[max_time, batch_size, n_classes + 2]
     outputs, states = tf.nn.dynamic_rnn(
                                 lstm_cell,
                                 x_concat,
@@ -216,6 +221,307 @@ def RNN(x_set, T_seq_length, ops, params):
     return tf.map_fn(output_projection, outputs), T_summary_weights, debugging_stuff
 
 
+
+############################
+######## LSTM RAW ##########
+############################
+def LSTM_raw_params_init(ops):
+    with tf.variable_scope("LSTM"):
+
+        W = {'out': weights_init(n_input=ops['n_hidden'],
+                                 n_output=ops['n_classes'],
+                                 name='W_out'),
+             'in_stack': weights_init(n_input = ops['n_classes'] + 2,
+                                      n_output = 4 * ops['n_hidden'],
+                                      name = 'W_in_stack'),
+             'rec_stack': weights_init(n_input=ops['n_hidden'],
+                                       n_output=4 * ops['n_hidden'],
+                                       name='W_rec_stack')
+             }
+        b = {'out': bias_init(
+                        ops['n_classes'],
+                        name='b_out'),
+            'stack': bias_init(
+                        4*ops['n_hidden'],
+                        name='b_stack')
+            }
+
+
+    params = {
+        'W': W,
+        'b': b
+    }
+    return params
+
+def LSTM(placeholders, ops, params):
+    x_set, T_seq_length, T_batch_size = placeholders
+    batch_size = tf.cast(T_batch_size, tf.int32)
+    W = params['W']
+    b = params['b']
+    block_size = [-1, ops['n_hidden']]
+
+    # get lstm_cell's output
+    # dynamic_rnn return by default:
+    #   outputs: [max_time, batch_size, cell.output_size]
+    x, xt, yt, _ = cut_up_x(x_set, ops)
+    x_concat = tf.concat([x, xt, yt], 2)  # [max_time, batch_size, n_classes + 2]
+
+    def _step(accumulated_vars, input_vars):
+        h_prev, c_prev, = accumulated_vars
+        x_in = input_vars
+        # m - multiply for all four vectors at once and then slice it
+        # gates: i - input, f - forget, o - output
+
+        preact = tf.matmul(x_in, W['in_stack']) + \
+                 tf.matmul(h_prev, W['rec_stack']) + \
+                 b['stack']
+        i = tf.sigmoid(tf.slice(preact, [0, 0*ops['n_hidden']], block_size))
+        f = tf.sigmoid(tf.slice(preact, [0, 1*ops['n_hidden']], block_size))
+        o = tf.sigmoid(tf.slice(preact, [0, 2*ops['n_hidden']], block_size))
+        # new potential candidate for memory vector
+        c_cand = tf.tanh(tf.slice(preact, [0, 3*ops['n_hidden']], block_size))
+
+        # update memory by forgetting existing memory & adding new candidate memory
+        c = f * c_prev + i * c_cand
+
+        # update hidden vector state
+        h = o * tf.tanh(c)
+
+        return [h, c]
+
+    # x_concat: (max_time, batch_size, n_classes + 2)
+    rval = tf.scan(_step,
+                   elems=x_concat,
+                   initializer=[
+                       tf.zeros([batch_size, ops['n_hidden']], tf.float32),  # h
+                       tf.zeros([batch_size, ops['n_hidden']], tf.float32)  # c
+                   ]
+                   , name='lstm/scan')
+
+
+    hidden_prediction = tf.transpose(rval[0], [1, 0, 2])  # -> [batch_size, n_steps, n_hidden]
+    output_projection = lambda x: tf.nn.softmax(tf.matmul(x, W['out']) + b['out'])
+
+    T_summary_weights = tf.zeros([1], name='None_tensor1')
+    debugging_stuff = rval[0]
+    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, debugging_stuff
+
+
+
+
+############################
+########## GRU #############
+############################
+def GRU_params_init(ops):
+    with tf.variable_scope("GRU"):
+
+        W = {'out': weights_init(n_input=ops['n_hidden'],
+                                 n_output=ops['n_classes'],
+                                 name='W_out'),
+             'W_zr': weights_init(n_input = ops['n_classes'] + 2,
+                                      n_output = 2 * ops['n_hidden'],
+                                      name = 'W_zr'),
+             'U_zr': weights_init(n_input=ops['n_hidden'],
+                                       n_output=2 * ops['n_hidden'],
+                                       name='U_zr'),
+             'W_h': weights_init(n_input=ops['n_classes'] + 2,
+                                      n_output=ops['n_hidden'],
+                                      name='W_h'),
+             'U_h': weights_init(n_input=ops['n_hidden'],
+                                       n_output=ops['n_hidden'],
+                                       name='U_h')
+
+             }
+        b = {'out': bias_init(
+                        ops['n_classes'],
+                        name='b_out'),
+            'zr': bias_init(
+                        2*ops['n_hidden'],
+                        name='b_zr'),
+            'h': bias_init(
+                        ops['n_hidden'],
+                        name='b_h')
+            }
+
+
+    params = {
+        'W': W,
+        'b': b
+    }
+    return params
+
+def GRU(placeholders, ops, params):
+    x_set, T_seq_length, T_batch_size = placeholders
+    batch_size = tf.cast(T_batch_size, tf.int32)
+    W = params['W']
+    b = params['b']
+    block_size = [-1, ops['n_hidden']]
+
+    # get lstm_cell's output
+    # dynamic_rnn return by default:
+    #   outputs: [max_time, batch_size, cell.output_size]
+    x, xt, yt, _ = cut_up_x(x_set, ops)
+    x_concat = tf.concat([x, xt, yt], 2)  # [max_time, batch_size, n_classes + 2]
+
+    def _step(accumulated_vars, input_vars):
+        h_prev = accumulated_vars
+        x_in = input_vars
+
+        preact = tf.sigmoid(tf.matmul(x_in, W['W_zr']) +
+                            tf.matmul(h_prev, W['U_zr']) +
+                            b['zr'])
+        z = tf.slice(preact, [0, 0*ops['n_hidden']], block_size)
+        r = tf.slice(preact, [0, 1*ops['n_hidden']], block_size)
+
+        h = z * h_prev + (1 - z) * tf.tanh(tf.matmul(x_in, W['W_h']) +
+                                           tf.matmul((r * h_prev), W['U_h']) +
+                                           b['h'])
+
+        return h
+
+
+    # x_concat: (max_time, batch_size, n_classes + 2)
+    rval = tf.scan(_step,
+                   elems=x_concat,
+                   initializer=tf.zeros([batch_size, ops['n_hidden']], tf.float32)
+                   , name='gru/scan')
+
+
+    hidden_prediction = tf.transpose(rval, [1, 0, 2])  # -> [batch_size, n_steps, n_hidden]
+    output_projection = lambda x: tf.nn.softmax(tf.matmul(x, W['out']) + b['out'])
+
+    T_summary_weights = tf.zeros([1], name='None_tensor1')
+    debugging_stuff = rval
+    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, debugging_stuff
+
+
+
+
+############################
+########## CTGRU #############
+############################
+def CTGRU_params_init(ops):
+    with tf.variable_scope("GRU"):
+
+        W = {'out': weights_init(n_input=ops['n_hidden'],
+                                 n_output=ops['n_classes'],
+                                 name='W_out'),
+             'in_stack': weights_init(n_input = ops['n_classes'] + 2,
+                                      n_output = 3 * ops['n_hidden'],
+                                      name = 'W_zr'),
+             'rec_stack': weights_init(n_input=ops['n_hidden'],
+                                       n_output=3 * ops['n_hidden'],
+                                       name='U_zr', small=False)
+
+             }
+        b = {'out': bias_init(
+                        ops['n_classes'],
+                        name='b_out'),
+            'stack': bias_init(
+                        3*ops['n_hidden'],
+                        name='b_zr')
+            }
+
+        timescales = 2.0 ** np.arange(-7,7)
+        gamma = 1.0 / timescales
+
+
+    params = {
+        'W': W,
+        'b': b,
+        'gamma': gamma,
+        'n_timescales': len(timescales)
+    }
+    return params
+
+def CTGRU(placeholders, ops, params):
+    x_set, T_seq_length, T_batch_size = placeholders
+    batch_size = tf.cast(T_batch_size, tf.int32)
+    W = params['W']
+    b = params['b']
+    gamma = params['gamma']
+    n_timescales = params['n_timescales']
+    block_size = [-1, ops['n_hidden']]
+    loggamma = np.log(gamma).astype(np.float32)
+
+
+
+    # get lstm_cell's output
+    # dynamic_rnn return by default:
+    #   outputs: [max_time, batch_size, cell.output_size]
+    x, xt, yt, _ = cut_up_x(x_set, ops)
+    x_concat = tf.concat([x, xt, yt], 2)  # (max_time, batch_size, n_classes + 2)
+
+    def _softmax_timeconst(tc):
+        softmaxed_tc = tf.nn.softmax(
+                                -(tf.expand_dims(tc, 2) # -> (batch_size, n_hid, 1)
+                                    - loggamma)**2.0)
+        return softmaxed_tc
+
+    def _step(accumulated_vars, input_vars):
+        h_prev, o_prev,  _,_,_,_,_,_,_,mul_prev,_ = accumulated_vars
+        x_in, yt = input_vars
+
+        preact = tf.matmul(x_in, W['in_stack']) +\
+                 0.1*tf.matmul(o_prev, W['rec_stack']) +\
+                 b['stack']
+        mul_prev = tf.matmul(o_prev, W['rec_stack'])
+        slice_preact = lambda i: tf.slice(preact, [0, i*ops['n_hidden']], block_size)
+
+        # 1) Detect event signal
+        q = tf.tanh(slice_preact(0))
+
+        # 2) Weight&scale of storage
+        s = slice_preact(1)
+        sigma = _softmax_timeconst(s)
+
+        # 3) Update&decay of memory
+        h_hat = ((1 - sigma) * h_prev + sigma * tf.expand_dims(q,2))
+        decay = tf.exp(
+                    tf.expand_dims(-gamma*yt, 1))
+        h =  h_hat * decay # -> (batch, 1, n_timescales)
+        #import pdb;pdb.set_trace()
+        # 4) Weight&scale of output
+        r = slice_preact(2)
+        rho = _softmax_timeconst(r)
+        # 5) Output
+        o = tf.reduce_sum(h * rho, axis=2)
+        return [h,o, h_prev,o_prev,q,s,sigma,r,rho, mul_prev, decay]
+
+
+    # x_concat: (max_time, batch_size, n_classes + 2)
+    rval = tf.scan(_step,
+                   elems=[x_concat, yt],
+                   initializer=[
+                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32), #h
+                                tf.zeros([batch_size, ops['n_hidden']], tf.float32), #o
+
+                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),  # h
+                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
+                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
+                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
+                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),
+                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
+                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),
+                                tf.zeros([batch_size, 3*ops['n_hidden']], tf.float32),
+                                tf.zeros([batch_size, 1, n_timescales], tf.float32)
+                                ]
+                   , name='ctgru/scan')
+
+    y_hat = rval[1]
+    hidden_prediction = tf.transpose(y_hat, [1, 0, 2])  # -> [batch_size, n_steps, n_class]
+    output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
+
+    T_summary_weights = tf.zeros([1], name='None_tensor1')
+    debugging_stuff = rval
+    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, debugging_stuff
+
+
+
+
+############################
+########### HPM ############
+############################
 def HPM_params_init(ops):
     with tf.variable_scope("HPM"):
         # W_in: range of each element is from 0 to 1, since each weight is a "probability" for each hidden unit.

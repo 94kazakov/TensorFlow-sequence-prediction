@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 import data_help as DH
 import tensor_classes_helpers as TCH
+import sys
 from tensorflow.python import debug as tf_debug
 import os
 
@@ -58,14 +59,15 @@ ops = {
             'learning_rate': 0.0005,
             'batch_size': 64,
             'max_length': 200,
-            'encoder': 'LSTM',
+            'encoder': 'CTGRU',
             'dataset': 'data/reddit/reddit',
             'overwrite': False,
-            'model_save_name': "TEST",
-            'model_load_name': "TEST",
+            "write_history": True,
+            'model_save_name': None,
+            'model_load_name': None,
             'store_graph': False,
             'collect_histograms': False,
-            'unique_mus_alphas': True,
+            'unique_mus_alphas': True, #HPM only
             'embedding': True
           }
 
@@ -91,20 +93,31 @@ P_mask = tf.placeholder("float",
 P_batch_size = tf.placeholder("float", None)
 
 
-
+print "MODE: ", ops['encoder']
 # params init
 if ops['encoder'] == "LSTM":
     params_lstm = TCH.LSTM_params_init(ops)
 elif ops['encoder'] == "HPM":
     params_hpm = TCH.HPM_params_init(ops)
+elif ops['encoder'] == "LSTM_RAW":
+    params_lstm = TCH.LSTM_raw_params_init(ops)
+elif ops['encoder'] == "GRU":
+    params_gru = TCH.GRU_params_init(ops)
+elif ops['encoder'] == "CTGRU":
+    params_ctgru = TCH.CTGRU_params_init(ops)
 
 # predict using encoder
 if ops['encoder'] == 'LSTM':
-    T_pred, T_summary_weights, debugging_stuff = TCH.RNN(P_x, P_len, ops, params_lstm)
+    T_pred, T_summary_weights, debugging_stuff = TCH.RNN([P_x, P_len], ops, params_lstm)
     T_pred = tf.transpose(T_pred, [1,0,2])
 elif ops['encoder'] == 'HPM':
     T_pred, T_summary_weights, debugging_stuff = TCH.HPM(P_x, P_len, P_batch_size, ops, params_hpm, P_batch_size)
-
+elif ops['encoder'] == "LSTM_RAW":
+    T_pred, T_summary_weights, debugging_stuff = TCH.LSTM([P_x, P_len, P_batch_size], ops, params_lstm)
+elif ops['encoder'] == "GRU":
+    T_pred, T_summary_weights, debugging_stuff = TCH.GRU([P_x, P_len, P_batch_size], ops, params_gru)
+elif ops['encoder'] == "CTGRU":
+    T_pred, T_summary_weights, debugging_stuff = TCH.CTGRU([P_x, P_len, P_batch_size], ops, params_ctgru)
 
 # (mean (batch_size):
 #   reduce_sum(n_steps):
@@ -179,13 +192,35 @@ while epoch < ops['epochs']:
                                                             P_mask: mask,
                                                             P_batch_size: batch_size})
 
+        #print counter
+        names = ["h","o", "h_prev","o_prev","q","s","sigma","r","rho",'mul','decay']
+        #np.set_printoptions(precision=5)
+        for i,var in enumerate(deb_var):
+            var = np.array(var)
+            # if names[i] in ['o_prev','h_prev','q','h_hat']:
+            #     print '\n'
+            #     if (var < -1.0).any():
+            #         print names[i], var[var < -1.0]
+            #     elif (var > 1.0).any():
+            #         print names[i], var[var > 1.0]
+            # if names[i] in ['sigma', 'rho']:
+            #     print '\n'
+            #     not_sum_to_one = lambda x: np.abs(np.sum(x, axis=3) - 1.0) > 0.00000001
+            #     if (not_sum_to_one(var)).any():
+            #         print names[i], np.sum(var[not_sum_to_one(var)], axis=1) - 1.0
+            #     #print names[i], list(var[:,0,:])#200,64,50
+            if np.isnan(var).any():
+                #import pdb; pdb.set_trace()
+                print "FOUND NAN", names[i]
+                sys.exit()
 
-        # Print parameters
+        #Print parameters
         # for v in tf.global_variables():
         #     v_ = T_sess.run(v)
         #     print v.name
-        #     print v_
-        #     print '\n'
+        #     # print v_
+        #     # print '\n'
+        # import pdb;pdb.set_trace()
 
         if ops['collect_histograms']:
             writer.add_summary(summary_weights, counter)
@@ -204,8 +239,9 @@ while epoch < ops['epochs']:
         print "Model Saved as ", ops['model_save_name']
         saver.save(T_sess, 'saved_models/' + ops['model_save_name'])
 
-    DH.write_history(accuracy_entry, 'records/acc.txt', epoch, ops['overwrite'])
-    DH.write_history(losses_entry, 'records/loss.txt', epoch, ops['overwrite'])
+    if ops['write_history']:
+        DH.write_history(accuracy_entry, 'records/acc.txt', epoch, ops['overwrite'])
+        DH.write_history(losses_entry, 'records/loss.txt', epoch, ops['overwrite'])
 
         
 
