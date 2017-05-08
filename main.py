@@ -58,16 +58,17 @@ ops = {
             'n_classes': 50, # aka n_input
             'learning_rate': 0.0005,
             'batch_size': 64,
-            'max_length': 300,
+            'max_length': 200,
             'encoder': 'HPM',
-            'dataset': 'data/lastfm/lastfm15K',
+            'dataset': 'data/reddit/reddit',
             'overwrite': False,
-            "write_history": True,
-            'model_save_name': "Lastfm_hpm_may8",
+            "write_history": True, #whether to write the history of training
+            'model_save_name': 'LSTM_RAW_may8_reddit',
             'model_load_name': None,
             'store_graph': False,
             'collect_histograms': False,
             'unique_mus_alphas': True, #HPM only
+            '1-to-1': True, #HPM only - forces it to be
             'embedding': True
           }
 
@@ -94,6 +95,9 @@ P_batch_size = tf.placeholder("float", None)
 
 
 print "MODE: ", ops['encoder']
+print "Store history of learning:", ops['write_history']
+
+
 # params init
 if ops['encoder'] == "LSTM":
     params_lstm = TCH.LSTM_params_init(ops)
@@ -194,7 +198,7 @@ while epoch < ops['epochs']:
 
         #print counter
         names = ["h","o", "h_prev","o_prev","q","s","sigma","r","rho",'mul','decay']
-        #np.set_printoptions(precision=5)
+        np.set_printoptions(precision=5)
         for i,var in enumerate(deb_var):
             var = np.array(var)
             # if names[i] in ['o_prev','h_prev','q','h_hat']:
@@ -211,8 +215,8 @@ while epoch < ops['epochs']:
             #     #print names[i], list(var[:,0,:])#200,64,50
             if np.isnan(var).any():
                 #import pdb; pdb.set_trace()
-                print "FOUND NAN", names[i]
-                sys.exit()
+                print "FOUND NAN", var#, names[i]
+                #sys.exit()
 
         #Print parameters
         # for v in tf.global_variables():

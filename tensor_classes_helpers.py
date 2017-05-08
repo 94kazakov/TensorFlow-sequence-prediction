@@ -62,10 +62,10 @@ def output_placeholder(max_length_seq=100,
                         number_of_classes], name=name)
     return y
 
-def weights_init(n_input, n_output, name=None, small=False, idendity=False, forced_zero=False):
+def weights_init(n_input, n_output, name=None, small_dev=False, idendity=False, forced_zero=False):
     init_matrix = None
-    if small:
-        init_matrix = tf.random_normal([n_input, n_output], stddev=0.01)
+    if small_dev:
+        init_matrix = tf.random_normal([n_input, n_output], stddev=small_dev)
     else:
         init_matrix = tf.random_normal([n_input, n_output])
 
@@ -236,7 +236,8 @@ def LSTM_raw_params_init(ops):
                                       name = 'W_in_stack'),
              'rec_stack': weights_init(n_input=ops['n_hidden'],
                                        n_output=4 * ops['n_hidden'],
-                                       name='W_rec_stack')
+                                       name='W_rec_stack',
+                                       small_dev=0.1)
              }
         b = {'out': bias_init(
                         ops['n_classes'],
@@ -553,31 +554,39 @@ def HPM_params_init(ops):
         #                      small=False,
         #                      forced_zero=True)
         #     }
-
         #OR
+        identity_flag = False
+        forced_zero_flag = False
+        if ops['1-to-1']:
+            identity_flag = True
+            forced_zero_flag = True
+
         W = {'in': weights_init(n_input=ops['n_classes'],
                                 n_output=ops['n_hidden'],
-                                name='W_in'),
+                                name='W_in',
+                                idendity=identity_flag),
              'recurrent': weights_init(n_input=ops['n_hidden'],
                                        n_output=ops['n_hidden'],
                                        name='W_recurrent',
-                                       small=True),
+                                       small_dev=0.01,
+                                       forced_zero=forced_zero_flag),
              'out': weights_init(n_input=ops['n_hidden'],
                                  n_output=ops['n_classes'],
-                                 name='W_out')
+                                 name='W_out',
+                                 idendity=identity_flag)
              }
 
         b = {
             'recurrent': bias_init(n_output=ops['n_hidden'],
                                    name='b_recurrent',
-                                   small=True),
+                                   small=True,
+                                   forced_zero=forced_zero_flag),
             'out': bias_init(n_output=ops['n_classes'],
-                             name='b_out')
+                             name='b_out',
+                             forced_zero=forced_zero_flag)
         }
 
-        # ALTERNATE
-        timescales = 2.0 ** np.arange(-7,7)#0,12)#(-7,7) vs (0, 1)
-        #timescales = 2.0 ** np.array([1,2,3,4,5,6,7,8,9,10,11])
+        timescales = 2.0 ** np.arange(-7,7)
         n_timescales = len(timescales)
         gamma = 1.0 / timescales
         c = tf.fill([n_timescales], 1.0 / n_timescales)
@@ -713,8 +722,7 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
         event = tf.sigmoid(
                         x_vec +  #:[batch_size, n_classes]*[n_classes, n_hid]
                         tf.matmul(y_hat, W['recurrent']) + b['recurrent'])  #:(batch_size, n_hid)*(n_hid, n_hid)
-        #OR TODO: make a flag for this running config
-        #event = tf.matmul(x, W['in'])
+
         # 2) update c
         event = tf.expand_dims(event, 2) # [batch_size, n_hid] -> [batch_size, n_hid, 1]
         # to support multiplication by [batch_size, n_hid, n_timescales]
