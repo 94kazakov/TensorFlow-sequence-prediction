@@ -489,6 +489,7 @@ def CTGRU(placeholders, ops, params):
         return [h,o, h_prev,o_prev,q,s,sigma,r,rho, mul_prev, decay]
 
 
+
     # x_concat: (max_time, batch_size, n_classes + 2)
     rval = tf.scan(_step,
                    elems=[x_concat, yt],
@@ -734,14 +735,11 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
         return [h, c, y_predict, event, z_hat]
 
 
-    x, xt, yt, x_leftover = cut_up_x(x_set, ops, P_len, n_timescales, P_batch_size)
+    x, xt, yt, _ = cut_up_x(x_set, ops) #TODO: arbitrary lengths
 
-    #activate x:
-    if ops['embedding']:
-        activate = lambda x: W['emb'][x]
-    else:
-        activate = lambda x: tf.matmul(x, W['in'])
-        x_vec = tf.map_fn(activate, x)
+
+    activate = lambda x: tf.matmul(x, W['in'])
+    x_vec = tf.map_fn(activate, x)
 
 
     print x, xt, yt
@@ -780,7 +778,7 @@ def HPM(x_set, P_len, P_batch_size, ops, params, batch_size):
     prediction_outputed = tf.map_fn(output_projection, hidden_prediction)
 
     # TODO: remove later by editing the part about the mask's dimension. For now, just fitting the old code
-    x_leftover = tf.transpose(x_leftover, [1,0,2]) + 1e-8# -> [batch_size, n_steps, n_classes]
-    prediction_outputed = tf.concat([prediction_outputed, x_leftover], 1)
+    #x_leftover = tf.transpose(x_leftover, [1,0,2]) + 1e-8# -> [batch_size, n_steps, n_classes]
+    #prediction_outputed = tf.concat([prediction_outputed, x_leftover], 1)
 
     return prediction_outputed, T_summary_weights, [rval[0], rval[1], rval[2], rval[3], rval[4], prediction_outputed]
