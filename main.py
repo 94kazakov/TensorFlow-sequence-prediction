@@ -59,21 +59,36 @@ ops = {
             'learning_rate': 0.0005,
             'batch_size': 64,
             'max_length': 200,
-            'encoder': 'HPM',
-            'dataset': 'data/reddit/reddit',
+            'encoder': 'CTGRU',
+            'dataset': 'data/lastfm_full/lastfm_global15K',
             'overwrite': False,
             "write_history": True, #whether to write the history of training
-            'model_save_name': 'LSTM_RAW_may8_reddit',
+            'model_save_name': None,
             'model_load_name': None,
             'store_graph': False,
             'collect_histograms': False,
-            'unique_mus_alphas': True, #HPM only
+            'unique_mus_alphas': False, #HPM only
             '1-to-1': True, #HPM only - forces it to be
-            'embedding': True
+            'embedding': True,
+            'embedding_size': 30,
+            'vocab_size': 10000
           }
 
 # load the dataset
-train_set, valid_set, test_set = DH.load_data(ops['dataset'], sort_by_len=True)    
+train_set, valid_set, test_set = DH.load_data(ops['dataset'], sort_by_len=True)
+if ops['embedding']:
+    extract_ids = lambda set: np.concatenate(np.array([set[i][0] for i in range(len(set))]))
+    all_ids = np.concatenate([np.array(extract_ids(train_set)),
+                             np.array(extract_ids(valid_set)),
+                             np.array(extract_ids(test_set))])
+
+
+    count, dictionary, reverse_dictionary = DH.build_dataset(all_ids, ops['vocab_size'])
+    print "Popular ids:", count[:5]
+    train_set = DH.remap_data(train_set, dictionary)
+    valid_set = DH.remap_data(valid_set, dictionary)
+    test_set = DH.remap_data(test_set, dictionary)
+
 print "Loaded the set: train({}), valid({}), test({})".format(len(train_set),
                                                                 len(valid_set),
                                                                   len(test_set))
@@ -87,11 +102,19 @@ P_len = tf.placeholder(tf.int32)
 P_x = TCH.input_placeholder(max_length_seq=ops['max_length'], 
                             frame_size=ops['frame_size'], name="x")
 
-P_y = TCH.output_placeholder(max_length_seq=ops['max_length'], 
+if ops['embedding']:
+    P_y = tf.placeholder("int32",
+                        [None, ops['max_length']], name='y')
+else:
+    P_y = TCH.output_placeholder(max_length_seq=ops['max_length'],
                             number_of_classes=ops['n_classes'], name='y')
 P_mask = tf.placeholder("float", 
                         [None, ops['max_length']], name='mask')
 P_batch_size = tf.placeholder("float", None)
+
+if ops['embedding']:
+    T_embedding_matrix = tf.Variable(
+        tf.random_uniform([ops['vocab_size'], ops['embedding_size']], -1.0, 1.0))
 
 
 print "MODE: ", ops['encoder']
@@ -121,22 +144,33 @@ elif ops['encoder'] == "LSTM_RAW":
 elif ops['encoder'] == "GRU":
     T_pred, T_summary_weights, debugging_stuff = TCH.GRU([P_x, P_len, P_batch_size], ops, params_gru)
 elif ops['encoder'] == "CTGRU":
-    T_pred, T_summary_weights, debugging_stuff = TCH.CTGRU([P_x, P_len, P_batch_size], ops, params_ctgru)
+    T_pred, T_summary_weights, debugging_stuff = TCH.CTGRU([P_x, P_len, P_batch_size, T_embedding_matrix], ops, params_ctgru)
+
 
 # (mean (batch_size):
 #   reduce_sum(n_steps):
 #       P_mask * (-reduce_sum(classes)):
 #           truth * predicted_distribution)
-T_cost = tf.reduce_sum(
+if ops['embedding']: #TODO: cos distance okay? since we only care about directions anyway
+    y_answer = tf.nn.embedding_lookup(T_embedding_matrix, P_y)
+    T_cost = tf.reduce_sum(
+        tf.reduce_sum(
             tf.reduce_sum(
-                - tf.reduce_sum(
-                    (P_y * tf.log(T_pred)),
+                (y_answer*T_pred)/(tf.norm(y_answer,2,keep_dims=True)*tf.norm(T_pred,2,keep_dims=True)),
                 reduction_indices=[2]) * P_mask,
             reduction_indices=[1])) / tf.reduce_sum(tf.reduce_sum(P_mask))
-T_optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(T_cost) 
+else:
+    y_answer = P_y
+    T_cost = tf.reduce_sum(
+                tf.reduce_sum(
+                    - tf.reduce_sum(
+                        (y_answer * tf.log(T_pred)),
+                    reduction_indices=[2]) * P_mask,
+                reduction_indices=[1])) / tf.reduce_sum(tf.reduce_sum(P_mask))
+T_optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(T_cost)
 
 # Evaluate the model
-T_correct_pred = tf.cast(tf.equal(tf.argmax(T_pred,2), tf.argmax(P_y,2)), tf.float32) * P_mask
+T_correct_pred = tf.cast(tf.equal(tf.argmax(T_pred,2), tf.argmax(y_answer,2)), tf.float32) * P_mask
 T_accuracy = tf.reduce_sum(tf.reduce_sum(tf.cast(T_correct_pred, tf.float32)))/tf.reduce_sum(tf.reduce_sum(P_mask))
 
 # Initialize the variables
@@ -186,7 +220,12 @@ while epoch < ops['epochs']:
                                             max_length = ops['max_length'])
         # x_set: [batch_size, max_length, frame_size]
 
-        y_answer = DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length'])
+        if ops['embedding']:
+            # batch_y = (batch, n_steps_padded)
+            y_answer = np.array(batch_y).astype(np.int32)
+        else:
+            # (batch_size, steps, n_classes)
+            y_answer = DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length'])
         _, deb_var, summary_weights = T_sess.run(
                                                 [T_optimizer, debugging_stuff, T_summary_weights],
                                                 feed_dict={
@@ -222,9 +261,7 @@ while epoch < ops['epochs']:
         # for v in tf.global_variables():
         #     v_ = T_sess.run(v)
         #     print v.name
-        #     # print v_
-        #     # print '\n'
-        # import pdb;pdb.set_trace()
+
 
         if ops['collect_histograms']:
             writer.add_summary(summary_weights, counter)
@@ -235,7 +272,7 @@ while epoch < ops['epochs']:
     dataset_names = ['train', 'test', 'valid']
 
     accuracy_entry, losses_entry = TCH.errors_and_losses(T_sess, P_x, P_y,
-                                                        P_len, P_mask, P_batch_size, T_accuracy, T_cost,
+                                                        P_len, P_mask, P_batch_size, T_accuracy, T_cost, T_embedding_matrix,
                                                         dataset_names, datasets, ops)
     print "Epoch:{}, Accuracy:{}, Losses:{}".format(epoch, accuracy_entry, losses_entry)
 

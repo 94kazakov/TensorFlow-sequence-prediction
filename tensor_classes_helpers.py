@@ -106,7 +106,7 @@ def softmax_init(shape):
     return tf.cast(tf.nn.softmax(tf.Variable(tf.random_normal(shape))), tf.float32)
 
 # TODO: amake rray-like arguments for concise format
-def cut_up_x(x_set, ops, P_len=None, n_timescales=None, P_batch_size=None):
+def cut_up_x(x_set, ops, P_len=None, n_timescales=None, P_batch_size=None, embedding_matrix=None):
     # x_set: [batch_size, max_length, frame_size]
     x_set = tf.transpose(x_set, [1,0,2])
     x_set = tf.cast(x_set, tf.float32)
@@ -122,7 +122,10 @@ def cut_up_x(x_set, ops, P_len=None, n_timescales=None, P_batch_size=None):
     # one hot embedding of x (previous state)
     x = tf.cast(x, tf.int32) # needs integers for one hot embedding to work
     # depth=n_classes, by default 1 for active, 0 inactive, appended as last dimension
-    x_vectorized = tf.one_hot(x - 1, ops['n_classes'], name='x_vectorized')
+    if ops['embedding']:
+        x_vectorized = tf.nn.embedding_lookup(embedding_matrix, x)
+    else:
+        x_vectorized = tf.one_hot(x - 1, ops['n_classes'], name='x_vectorized')
     # x_vectorized: [n_steps, batch_size, n_classes]
     x_leftover = None
     if P_len != None:
@@ -136,7 +139,7 @@ def cut_up_x(x_set, ops, P_len=None, n_timescales=None, P_batch_size=None):
         yt = tf.slice(yt, [0,0,0], [P_len, -1, -1], name='yt')
     return x_vectorized, xt, yt, x_leftover
 
-def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  T_cost, dataset_names, datasets, ops):
+def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  T_cost, T_embedding_matrix, dataset_names, datasets, ops):
     # passes all needed tensor placeholders to fill with passed datasets
     # computers errors and losses for train/test/validation sets
     # Depending on what T_accuracy, T_cost are, different nets can be called
@@ -153,11 +156,18 @@ def errors_and_losses(sess, P_x, P_y, P_len, P_mask, P_batch_size, T_accuracy,  
             x_set, batch_y, batch_maxlen, batch_size, mask = DH.pick_batch(
                                             dataset = dataset,
                                             batch_indeces = batch_ids, 
-                                            max_length = ops['max_length']) 
+                                            max_length = ops['max_length'])
+
+            if ops['embedding']:
+                # batch_y = (batch, n_steps_padded)
+                y_answer = np.array(batch_y).astype(np.int32)
+            else:
+                y_answer = DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length'])
+
             accuracy_batch, cost_batch = sess.run([T_accuracy, T_cost],
                                                     feed_dict={
                                                         P_x: x_set,
-                                                        P_y: DH.embed_one_hot(batch_y, 0.0, ops['n_classes'], ops['max_length']),
+                                                        P_y: y_answer,
                                                         P_len: batch_maxlen,
                                                         P_mask: mask,
                                                         P_batch_size: batch_size})
@@ -399,24 +409,30 @@ def GRU(placeholders, ops, params):
 
 
 ############################
-########## CTGRU #############
+########## CTGRU ###########
 ############################
 def CTGRU_params_init(ops):
     with tf.variable_scope("GRU"):
+        if ops['embedding']:
+            n_input = ops['embedding_size']
+            n_output = n_input
+        else:
+            n_input = ops['n_classes']
+            n_output = n_input
 
         W = {'out': weights_init(n_input=ops['n_hidden'],
-                                 n_output=ops['n_classes'],
+                                 n_output=n_output,
                                  name='W_out'),
-             'in_stack': weights_init(n_input = ops['n_classes'] + 2,
+             'in_stack': weights_init(n_input = n_input + 2,
                                       n_output = 3 * ops['n_hidden'],
                                       name = 'W_zr'),
              'rec_stack': weights_init(n_input=ops['n_hidden'],
                                        n_output=3 * ops['n_hidden'],
-                                       name='U_zr', small=False)
+                                       name='U_zr', small_dev=0.1)
 
              }
         b = {'out': bias_init(
-                        ops['n_classes'],
+                        n_output,
                         name='b_out'),
             'stack': bias_init(
                         3*ops['n_hidden'],
@@ -436,7 +452,7 @@ def CTGRU_params_init(ops):
     return params
 
 def CTGRU(placeholders, ops, params):
-    x_set, T_seq_length, T_batch_size = placeholders
+    x_set, T_seq_length, T_batch_size, embedding_matrix = placeholders
     batch_size = tf.cast(T_batch_size, tf.int32)
     W = params['W']
     b = params['b']
@@ -450,7 +466,7 @@ def CTGRU(placeholders, ops, params):
     # get lstm_cell's output
     # dynamic_rnn return by default:
     #   outputs: [max_time, batch_size, cell.output_size]
-    x, xt, yt, _ = cut_up_x(x_set, ops)
+    x, xt, yt, _ = cut_up_x(x_set, ops, embedding_matrix=embedding_matrix)
     x_concat = tf.concat([x, xt, yt], 2)  # (max_time, batch_size, n_classes + 2)
 
     def _softmax_timeconst(tc):
@@ -464,7 +480,7 @@ def CTGRU(placeholders, ops, params):
         x_in, yt = input_vars
 
         preact = tf.matmul(x_in, W['in_stack']) +\
-                 0.1*tf.matmul(o_prev, W['rec_stack']) +\
+                 tf.matmul(o_prev, W['rec_stack']) +\
                  b['stack']
         mul_prev = tf.matmul(o_prev, W['rec_stack'])
         slice_preact = lambda i: tf.slice(preact, [0, i*ops['n_hidden']], block_size)
@@ -512,7 +528,13 @@ def CTGRU(placeholders, ops, params):
 
     y_hat = rval[1]
     hidden_prediction = tf.transpose(y_hat, [1, 0, 2])  # -> [batch_size, n_steps, n_class]
-    output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
+    if ops['embedding']:
+        def output_projection(x):
+            product = tf.matmul(x, W['out']) + b['out']
+            return product/tf.expand_dims(tf.reduce_sum(product,1), 1) #normalize output across each embedding
+    else:
+        output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
+
 
     T_summary_weights = tf.zeros([1], name='None_tensor1')
     debugging_stuff = rval

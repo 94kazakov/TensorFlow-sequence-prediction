@@ -2,6 +2,8 @@ import tensorflow as tf
 import numpy as np
 import random
 import os
+import collections
+
 
 """
 # TODO:
@@ -206,6 +208,35 @@ def embed_one_hot(batch_array, batch_size, depth, length):
         array = [array[j] - 1 for j in range(0, first_zero_id)]
         one_hot_matrix[i, np.arange(len(array)), array] = 1
     return one_hot_matrix
+
+def build_dataset(words, n_words):
+  """Process raw inputs into a dataset."""
+  count = collections.Counter(words).most_common(n_words - 1)
+  dictionary = {}
+  for word, _ in count:
+    dictionary[word] = len(dictionary) + 1
+
+  reversed_dictionary = dict(zip(dictionary.values(), dictionary.keys()))
+  return count, dictionary, reversed_dictionary
+
+def remap_data(data, remap_dict):
+    """
+    a = np.array([[1,2,3],
+              [3,2,4]])
+    my_dict = {1:23, 2:34, 3:36, 4:45}
+    np.vectorize(my_dict.get)(a)
+    array([[23, 34, 36],
+       [36, 34, 45]])
+    """
+    #remap_vectorized = np.vectorize(remap_dict.get)
+    remap = lambda x: [remap_dict[el] if (el in remap_dict) else 0 for el in x]
+    print 'BEFORE', data[0][0]
+    for seq in data:
+        seq[0] = remap(seq[0])
+        seq[2] = remap(seq[2])
+    print 'AFTER', data[0][0]
+    return data
+
 
 def length(sequence):
     used = tf.sign(tf.reduce_max(tf.abs(sequence), reduction_indices=2))
