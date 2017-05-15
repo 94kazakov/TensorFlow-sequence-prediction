@@ -58,9 +58,9 @@ ops = {
             'n_classes': 50, # aka n_input
             'learning_rate': 0.0005,
             'batch_size': 64,
-            'max_length': 200,
-            'encoder': 'CTGRU',
-            'dataset': 'data/lastfm_full/lastfm_global15K',
+            'max_length': 100,
+            'encoder': 'CTGRU_5_1',
+            'dataset': 'data/synthetic_cluster/cluster3',
             'overwrite': False,
             "write_history": True, #whether to write the history of training
             'model_save_name': None,
@@ -69,9 +69,10 @@ ops = {
             'collect_histograms': False,
             'unique_mus_alphas': False, #HPM only
             '1-to-1': True, #HPM only - forces it to be
-            'embedding': True,
+            'embedding': False, #only for CTGRU so far TODO: extract to be generic
             'embedding_size': 30,
-            'vocab_size': 10000
+            'vocab_size': 10000,
+            'task': "CLASS" #CLASS vs PRED
           }
 
 # load the dataset
@@ -112,9 +113,11 @@ P_mask = tf.placeholder("float",
                         [None, ops['max_length']], name='mask')
 P_batch_size = tf.placeholder("float", None)
 
+T_embedding_matrix = None
 if ops['embedding']:
     T_embedding_matrix = tf.Variable(
         tf.random_uniform([ops['vocab_size'], ops['embedding_size']], -1.0, 1.0))
+
 
 
 print "MODE: ", ops['encoder']
@@ -130,7 +133,7 @@ elif ops['encoder'] == "LSTM_RAW":
     params_lstm = TCH.LSTM_raw_params_init(ops)
 elif ops['encoder'] == "GRU":
     params_gru = TCH.GRU_params_init(ops)
-elif ops['encoder'] == "CTGRU":
+elif ops['encoder'] == "CTGRU_5_1" or ops['encoder'] == "CTGRU_5_3":
     params_ctgru = TCH.CTGRU_params_init(ops)
 
 # predict using encoder
@@ -143,8 +146,10 @@ elif ops['encoder'] == "LSTM_RAW":
     T_pred, T_summary_weights, debugging_stuff = TCH.LSTM([P_x, P_len, P_batch_size], ops, params_lstm)
 elif ops['encoder'] == "GRU":
     T_pred, T_summary_weights, debugging_stuff = TCH.GRU([P_x, P_len, P_batch_size], ops, params_gru)
-elif ops['encoder'] == "CTGRU":
-    T_pred, T_summary_weights, debugging_stuff = TCH.CTGRU([P_x, P_len, P_batch_size, T_embedding_matrix], ops, params_ctgru)
+elif ops['encoder'] == "CTGRU_5_3":
+    T_pred, T_summary_weights, debugging_stuff = TCH.CTGRU_5_3([P_x, P_len, P_batch_size, T_embedding_matrix], ops, params_ctgru)
+elif ops['encoder'] == "CTGRU_5_1":
+    T_pred, T_summary_weights, debugging_stuff = TCH.CTGRU_5_1([P_x, P_len, P_batch_size, T_embedding_matrix], ops, params_ctgru)
 
 
 # (mean (batch_size):
@@ -156,22 +161,38 @@ if ops['embedding']: #TODO: cos distance okay? since we only care about directio
     T_cost = tf.reduce_sum(
         tf.reduce_sum(
             tf.reduce_sum(
-                (y_answer*T_pred)/(tf.norm(y_answer,2,keep_dims=True)*tf.norm(T_pred,2,keep_dims=True)),
+               tf.abs((y_answer*T_pred)/(tf.norm(y_answer,2,keep_dims=True)*tf.norm(T_pred,2,keep_dims=True)) - 1.0)**2,
                 reduction_indices=[2]) * P_mask,
             reduction_indices=[1])) / tf.reduce_sum(tf.reduce_sum(P_mask))
 else:
-    y_answer = P_y
-    T_cost = tf.reduce_sum(
-                tf.reduce_sum(
-                    - tf.reduce_sum(
-                        (y_answer * tf.log(T_pred)),
-                    reduction_indices=[2]) * P_mask,
-                reduction_indices=[1])) / tf.reduce_sum(tf.reduce_sum(P_mask))
+    if ops['task'] == 'PRED':
+        y_answer = P_y
+        T_cost = tf.reduce_sum(
+                    tf.reduce_sum(
+                        - tf.reduce_sum(
+                            (y_answer * tf.log(T_pred)),
+                        reduction_indices=[2]) * P_mask,
+                    reduction_indices=[1])) / tf.reduce_sum(tf.reduce_sum(P_mask))
+
+        # Evaluate the model
+        T_correct_pred = tf.cast(tf.equal(tf.argmax(T_pred, 2), tf.argmax(y_answer, 2)), tf.float32) * P_mask
+        T_accuracy = tf.reduce_sum(tf.reduce_sum(tf.cast(T_correct_pred, tf.float32))) / tf.reduce_sum(
+            tf.reduce_sum(P_mask))
+    elif ops['task'] == "CLASS":
+        y_answer = P_y
+        T_cost = tf.reduce_sum(
+                - tf.reduce_sum(
+                    (y_answer * tf.log(T_pred)),
+                    reduction_indices=[2])[:,-1]
+                ) / tf.reduce_sum(tf.reduce_sum(y_answer))
+
+        # Evaluate the model
+        T_correct_pred = tf.cast(tf.equal(tf.argmax(T_pred, 2), tf.argmax(y_answer, 2)), tf.float32)
+        T_accuracy = tf.reduce_sum(tf.cast(T_correct_pred[:,-1], tf.float32)) / tf.reduce_sum(
+            tf.reduce_sum(y_answer))
+
 T_optimizer = tf.train.AdamOptimizer(learning_rate=ops['learning_rate']).minimize(T_cost)
 
-# Evaluate the model
-T_correct_pred = tf.cast(tf.equal(tf.argmax(T_pred,2), tf.argmax(y_answer,2)), tf.float32) * P_mask
-T_accuracy = tf.reduce_sum(tf.reduce_sum(tf.cast(T_correct_pred, tf.float32)))/tf.reduce_sum(tf.reduce_sum(P_mask))
 
 # Initialize the variables
 init = tf.global_variables_initializer()
@@ -235,7 +256,7 @@ while epoch < ops['epochs']:
                                                             P_mask: mask,
                                                             P_batch_size: batch_size})
 
-        #print counter
+        print counter
         names = ["h","o", "h_prev","o_prev","q","s","sigma","r","rho",'mul','decay']
         np.set_printoptions(precision=5)
         for i,var in enumerate(deb_var):
@@ -254,8 +275,8 @@ while epoch < ops['epochs']:
             #     #print names[i], list(var[:,0,:])#200,64,50
             if np.isnan(var).any():
                 #import pdb; pdb.set_trace()
-                print "FOUND NAN", var#, names[i]
-                #sys.exit()
+                print "FOUND NAN"#, names[i]
+                sys.exit()
 
         #Print parameters
         # for v in tf.global_variables():

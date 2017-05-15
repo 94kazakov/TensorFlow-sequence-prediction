@@ -83,11 +83,14 @@ def weights_init(n_input, n_output, name=None, small_dev=False, idendity=False, 
     W = tf.Variable(init_matrix, name=name, trainable=trainable)
     return W
 
-def bias_init(n_output, name=None, small=False, forced_zero=False):
+def bias_init(n_output, name=None, small=False, forced_zero=False, small_dev=False):
     if small: #bias is negative so that initially, bias is pulling tthe sigmoid towards 0, not 1/2.
         b = tf.random_normal([n_output], mean=-4.0, stddev = 0.01)
     else:
         b = tf.random_normal([n_output])
+
+    if small_dev:
+        b = tf.random_normal([n_output], stddev=small_dev)
 
     if forced_zero:
         b = tf.stop_gradient(tf.zeros([n_output]))
@@ -409,7 +412,7 @@ def GRU(placeholders, ops, params):
 
 
 ############################
-########## CTGRU ###########
+########## CTGRU5.3 ###########
 ############################
 def CTGRU_params_init(ops):
     with tf.variable_scope("GRU"):
@@ -425,10 +428,10 @@ def CTGRU_params_init(ops):
                                  name='W_out'),
              'in_stack': weights_init(n_input = n_input + 2,
                                       n_output = 3 * ops['n_hidden'],
-                                      name = 'W_zr'),
+                                      name = 'W_zr', small_dev=0.01),
              'rec_stack': weights_init(n_input=ops['n_hidden'],
                                        n_output=3 * ops['n_hidden'],
-                                       name='U_zr', small_dev=0.1)
+                                       name='U_zr', small_dev=0.01)
 
              }
         b = {'out': bias_init(
@@ -436,7 +439,7 @@ def CTGRU_params_init(ops):
                         name='b_out'),
             'stack': bias_init(
                         3*ops['n_hidden'],
-                        name='b_zr')
+                        name='b_zr', small_dev=0.1)
             }
 
         timescales = 2.0 ** np.arange(-7,7)
@@ -451,7 +454,7 @@ def CTGRU_params_init(ops):
     }
     return params
 
-def CTGRU(placeholders, ops, params):
+def CTGRU_5_3(placeholders, ops, params):
     x_set, T_seq_length, T_batch_size, embedding_matrix = placeholders
     batch_size = tf.cast(T_batch_size, tf.int32)
     W = params['W']
@@ -476,13 +479,13 @@ def CTGRU(placeholders, ops, params):
         return softmaxed_tc
 
     def _step(accumulated_vars, input_vars):
-        h_prev, o_prev,  _,_,_,_,_,_,_,mul_prev,_ = accumulated_vars
+        h_prev, o_prev = accumulated_vars
         x_in, yt = input_vars
 
         preact = tf.matmul(x_in, W['in_stack']) +\
                  tf.matmul(o_prev, W['rec_stack']) +\
                  b['stack']
-        mul_prev = tf.matmul(o_prev, W['rec_stack'])
+
         slice_preact = lambda i: tf.slice(preact, [0, i*ops['n_hidden']], block_size)
 
         # 1) Detect event signal
@@ -503,7 +506,7 @@ def CTGRU(placeholders, ops, params):
         rho = _softmax_timeconst(r)
         # 5) Output
         o = tf.reduce_sum(h * rho, axis=2)
-        return [h,o, h_prev,o_prev,q,s,sigma,r,rho, mul_prev, decay]
+        return [h,o]
 
 
 
@@ -514,15 +517,6 @@ def CTGRU(placeholders, ops, params):
                                 tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32), #h
                                 tf.zeros([batch_size, ops['n_hidden']], tf.float32), #o
 
-                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),  # h
-                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
-                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
-                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
-                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),
-                                tf.zeros([batch_size, ops['n_hidden']], tf.float32),
-                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32),
-                                tf.zeros([batch_size, 3*ops['n_hidden']], tf.float32),
-                                tf.zeros([batch_size, 1, n_timescales], tf.float32)
                                 ]
                    , name='ctgru/scan')
 
@@ -540,6 +534,93 @@ def CTGRU(placeholders, ops, params):
     debugging_stuff = rval
     return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, debugging_stuff
 
+############################
+######## CTGRU 5.1 #########
+############################
+def CTGRU_5_1(placeholders, ops, params):
+    x_set, T_seq_length, T_batch_size, embedding_matrix = placeholders
+    batch_size = tf.cast(T_batch_size, tf.int32)
+    W = params['W']
+    b = params['b']
+    gamma = params['gamma']
+    n_timescales = params['n_timescales']
+    block_size = [-1, ops['n_hidden']]
+
+
+
+    # get lstm_cell's output
+    # dynamic_rnn return by default:
+    #   outputs: [max_time, batch_size, cell.output_size]
+    x, xt, yt, _ = cut_up_x(x_set, ops, embedding_matrix=embedding_matrix)
+    x_concat = tf.concat([x, xt, yt], 2)  # (max_time, batch_size, n_classes + 2)
+
+    def _timescale_approx(tc):
+        top = (tf.exp(-tf.log(tf.expand_dims(tc, 2) # -> (batch_size, n_hid, 1)
+                                       /gamma)**2))
+
+        top = top/tf.reduce_sum(top, 2, keep_dims=True) # sum across timescales
+        return top
+
+    def _step(accumulated_vars, input_vars):
+        h_prev, o_prev = accumulated_vars
+        x_in, yt = input_vars
+        matrix_slice = lambda W,i: 0.01*tf.slice(W, [0, i*ops['n_hidden']], block_size)
+        bias_slice = lambda  b,i: tf.slice(b, [i*ops['n_hidden']], [ops['n_hidden']])
+        # 1) Weight&scale of output
+        r =  tf.exp(tf.matmul(x_in, matrix_slice(W['in_stack'],0)) +\
+                    tf.matmul(o_prev, matrix_slice(W['rec_stack'],0)) +\
+                    bias_slice(b['stack'],0))
+        rho = _timescale_approx(r)
+
+        # 2) retrieve memory
+        o_hat = tf.reduce_sum(h_prev * rho, axis=2)
+
+        # 3) Detect event signal
+        q = tf.tanh(tf.matmul(x_in, matrix_slice(W['in_stack'],1)) +\
+                    tf.matmul(o_hat, matrix_slice(W['rec_stack'],1)) +\
+                    bias_slice(b['stack'],1))
+
+        # 4) Weight&scale of storage
+        s = tf.exp(tf.matmul(x_in, matrix_slice(W['in_stack'],2)) +\
+                   tf.matmul(o_prev, matrix_slice(W['rec_stack'],2)) +\
+                   bias_slice(b['stack'],2))
+        sigma = _timescale_approx(s)
+
+        # 5) Update&decay of memory
+        h_hat = ((1 - sigma) * h_prev + sigma * tf.expand_dims(q,2))
+        decay = tf.exp(
+                    tf.expand_dims(-gamma*yt, 1))
+        h =  h_hat * decay # -> (batch, 1, n_timescales)
+        #import pdb;pdb.set_trace()
+
+        # 6) Output
+        o = tf.reduce_sum(h, axis=2)
+        return [h,o]
+
+
+
+    # x_concat: (max_time, batch_size, n_classes + 2)
+    rval = tf.scan(_step,
+                   elems=[x_concat, yt],
+                   initializer=[
+                                tf.zeros([batch_size, ops['n_hidden'], n_timescales], tf.float32), #h
+                                tf.zeros([batch_size, ops['n_hidden']], tf.float32), #o
+                                ]
+                   , name='ctgru/scan')
+
+    y_hat = rval[1]
+    hidden_prediction = tf.transpose(y_hat, [1, 0, 2])  # -> [batch_size, n_steps, n_class]
+    if ops['embedding']:
+        def output_projection(x):
+            product = tf.matmul(x, W['out']) + b['out']
+            return product/tf.expand_dims(tf.reduce_sum(product,1), 1) #normalize output across each embedding
+    else:
+        output_projection = lambda x: tf.clip_by_value(tf.nn.softmax(tf.matmul(x, W['out']) + b['out']), 1e-8, 1.0)
+
+
+    T_summary_weights = tf.zeros([1], name='None_tensor1')
+    debugging_stuff = rval
+    return tf.map_fn(output_projection, hidden_prediction), T_summary_weights, debugging_stuff
 
 
 
